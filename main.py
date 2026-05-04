@@ -185,6 +185,26 @@ class OmniDrawPlugin(Star):
         if sender_id in allowed: return True
         return False
 
+    def _get_event_text(self, event: AstrMessageEvent) -> str:
+        text = getattr(event, "message_str", "") or getattr(event.message_obj, "message_str", "")
+        if text:
+            return str(text).strip()
+        message = getattr(event.message_obj, "message", []) or []
+        plain_text = "".join(getattr(comp, "text", "") for comp in message if isinstance(comp, Plain)).strip()
+        if plain_text:
+            return plain_text
+        return str(getattr(event, "message_obj", "") or "").strip()
+
+    def _extract_command_message(self, event: AstrMessageEvent, command: str, fallback: str = "") -> str:
+        text = self._get_event_text(event)
+        if not text:
+            return fallback.strip()
+        pattern = rf'^\s*[/!！.]?{re.escape(command)}(?:\s+(.*))?$'
+        match = re.match(pattern, text, flags=re.S)
+        if match:
+            return (match.group(1) or "").strip()
+        return fallback.strip()
+
     def _create_image_component(self, image_url: str) -> Image:
         if image_url.startswith("data:image"):
             b64_data = image_url.split(",", 1)[1]
@@ -324,7 +344,7 @@ class OmniDrawPlugin(Star):
         
         msg = f"{MessageEmoji.PAINTING} 收到灵感，正在绘制..."
         if self.plugin_config.verbose_report:
-            msg += f"\n[调试] 宏对应提示词: {preset_prompt}\n[调试] 识别参考图: {len(safe_refs) if safe_refs else 0}张"
+            msg += f"\n📝 宏对应提示词: {preset_prompt}\n🖼️ 实际参考图：{len(safe_refs) if safe_refs else 0} 张"
         yield event.plain_result(msg)
         
         try:
@@ -339,7 +359,8 @@ class OmniDrawPlugin(Star):
     @handle_errors
     async def cmd_draw(self, event: AstrMessageEvent, p1: str="", p2: str="", p3: str="", p4: str="", p5: str="", p6: str="", p7: str="", p8: str="", p9: str="", p10: str="") -> AsyncGenerator[Any, None]:
         if not self._has_permission(event): return
-        message = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        fallback = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        message = self._extract_command_message(event, "画", fallback)
         raw_refs = self._get_event_images(event)
         if not message and not raw_refs:
             yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带参考图！")
@@ -347,11 +368,12 @@ class OmniDrawPlugin(Star):
             
         safe_refs = await self._process_and_save_images(raw_refs)
         prompt, kwargs = self.cmd_parser.parse(message)
+        param_count = len(kwargs)
         if safe_refs: kwargs["user_refs"] = safe_refs
             
         msg = f"{MessageEmoji.PAINTING} 收到灵感，正在绘制..."
         if self.plugin_config.verbose_report:
-            msg += f"\n[调试] 最终提示词: {prompt}\n[调试] 透传参数: {len(kwargs)}个\n[调试] 识别参考图: {len(safe_refs) if safe_refs else 0}张"
+            msg += f"\n📝 最终提示词: {prompt}\n⚙️ 附加参数：{param_count} 个\n🖼️ 实际参考图：{len(safe_refs) if safe_refs else 0} 张"
         yield event.plain_result(msg)
         
         async with aiohttp.ClientSession() as session:
@@ -363,13 +385,15 @@ class OmniDrawPlugin(Star):
     @handle_errors
     async def cmd_selfie(self, event: AstrMessageEvent, p1: str="", p2: str="", p3: str="", p4: str="", p5: str="", p6: str="", p7: str="", p8: str="", p9: str="", p10: str="") -> AsyncGenerator[Any, None]:
         if not self._has_permission(event): return
-        message = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        fallback = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        message = self._extract_command_message(event, "自拍", fallback)
         user_input, kwargs = self.cmd_parser.parse(message)
         if not user_input: user_input = "看着镜头微笑"
         
         opt_actions = await self.prompt_optimizer.optimize(user_input, count=1)
         final_prompt, extra_kwargs = self.persona_manager.build_persona_prompt(opt_actions[0] if opt_actions else user_input)
         extra_kwargs.update(kwargs)
+        param_count = len(kwargs)
         
         # 🔴 调用本脚本专用列表字段，底层依然可以拿单数爽
         persona_ref = self.plugin_config.persona_ref_images
@@ -384,7 +408,7 @@ class OmniDrawPlugin(Star):
             
         msg = f"{MessageEmoji.INFO} 正在为「{self.plugin_config.persona_name}」生成自拍，请稍候..."
         if self.plugin_config.verbose_report:
-            msg += f"\n[调试] 构建提示词: {final_prompt}\n[调试] 透传参数: {len(extra_kwargs)}个\n[调试] 识别参考图: {len(safe_refs) if safe_refs else 0}张"
+            msg += f"\n📝 构建提示词: {final_prompt}\n⚙️ 附加参数：{param_count} 个\n🖼️ 实际参考图：{len(safe_refs) if safe_refs else 0} 张"
         yield event.plain_result(msg)
         
         chain_to_use = "selfie" if "selfie" in self.plugin_config.chains else "text2img"
@@ -397,7 +421,8 @@ class OmniDrawPlugin(Star):
     @handle_errors
     async def cmd_video(self, event: AstrMessageEvent, p1: str="", p2: str="", p3: str="", p4: str="", p5: str="", p6: str="", p7: str="", p8: str="", p9: str="", p10: str="") -> AsyncGenerator[Any, None]:
         if not self._has_permission(event): return
-        message = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        fallback = " ".join(str(x) for x in [p1,p2,p3,p4,p5,p6,p7,p8,p9,p10] if x).strip()
+        message = self._extract_command_message(event, "视频", fallback)
         raw_refs = self._get_event_images(event)
         if not message and not raw_refs: return
         prompt, _ = self.cmd_parser.parse(message)
@@ -405,7 +430,7 @@ class OmniDrawPlugin(Star):
         
         msg = f"{MessageEmoji.INFO} 视频任务已提交后台渲染..."
         if self.plugin_config.verbose_report:
-            msg += f"\n[调试] 渲染提示词: {prompt}\n[调试] 识别首尾帧/参考图: {len(safe_refs) if safe_refs else 0}张"
+            msg += f"\n📝 渲染提示词: {prompt}\n⚙️ 附加参数：0 个\n🖼️ 参考图/首尾帧：{len(safe_refs) if safe_refs else 0} 张"
         yield event.plain_result(msg)
         
         asyncio.create_task(self.video_manager.background_task_runner(event, prompt, safe_refs))
