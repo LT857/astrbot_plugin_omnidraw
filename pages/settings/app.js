@@ -3,7 +3,7 @@ const bridge = window.AstrBotPluginPage;
 let state = {
     permission_config: {}, persona_config: { persona_ref_image: [] }, optimizer_config: {}, router_config: {},
     presets: [], providers: [], video_providers: [], verbose_report: false,
-    gallery: [], selected_gallery_files: new Set() // ✨ 图库状态
+    gallery: [], selected_gallery_files: new Set()
 };
 
 function showToast(message, type = 'success') {
@@ -16,7 +16,7 @@ function showToast(message, type = 'success') {
     setTimeout(() => toast.remove(), 2800);
 }
 
-// ✨ 修复：完全复用 image-preview 类，保证高度一致、宽度自适应（不拉伸）
+// ✨ 图库渲染引擎核心修复
 async function renderGallery() {
     const container = document.getElementById('gallery-container');
     if(!container) return;
@@ -27,25 +27,23 @@ async function renderGallery() {
     
     container.innerHTML = state.gallery.map((filename, idx) => {
         const isSelected = state.selected_gallery_files.has(filename);
-        // 使用原版样式 image-preview-wrapper 与 image-preview
+        // 💡 修复白线：给一个加载底色和最小尺寸，保证在图片加载出来前不会缩成线。加载后宽自适应，高受限，完美保持原比例！
         return `
-        <div class="image-preview-wrapper gallery-item-wrapper" data-file="${filename}" style="position: relative; cursor: pointer; transition: transform 0.2s; border: ${isSelected ? '3px solid #006FEE' : '2px solid transparent'}; border-radius: 8px; overflow: hidden; display: inline-block;">
-            <img src="" class="image-preview" style="display: block; opacity: ${isSelected ? '0.8' : '1'}; transition: all 0.2s;" id="gallery-img-${idx}">
+        <div class="image-preview-wrapper gallery-item-wrapper" data-file="${filename}" style="position: relative; cursor: pointer; transition: transform 0.2s; border: ${isSelected ? '3px solid #006FEE' : '2px solid transparent'}; border-radius: 8px; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.05); min-width: 100px; min-height: 100px;">
+            <img src="" class="image-preview" style="display: block; opacity: ${isSelected ? '0.8' : '1'}; transition: all 0.2s; max-height: 200px; width: auto; object-fit: contain;" id="gallery-img-${idx}">
             ${isSelected ? `<div style="position: absolute; top: 0; right: 0; width: 24px; height: 24px; background: #006FEE; color: #FFF; border-bottom-left-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold; z-index: 10;">✓</div>` : ''}
         </div>
         `;
     }).join('');
 
-    // ✨ 修复图片获取 BUG：将参数直接拼在 URL 后，防止 bridge.apiGet 漏传参数
+    // ✨ 修复加载失败：放弃 GET 请求的 URL 拼接，直接用 POST 发送 JSON 载荷
     for(let idx = 0; idx < state.gallery.length; idx++) {
         const filename = state.gallery[idx];
         try {
             const imgEl = document.getElementById(`gallery-img-${idx}`);
             if(!imgEl) continue;
-            // 防重复加载
             if(!imgEl.getAttribute('src')) {
-                 const url = `get_gallery_image?filename=${encodeURIComponent(filename)}`;
-                 const res = await bridge.apiGet(url);
+                 const res = await bridge.apiPost("get_gallery_image", { filename: filename });
                  if(res && res.base64) imgEl.setAttribute('src', res.base64);
             }
         } catch(e) {}
@@ -54,8 +52,9 @@ async function renderGallery() {
 
 async function fetchGallery() {
     try {
-        const files = await bridge.apiGet("get_gallery_list");
-        state.gallery = Array.isArray(files) ? files : [];
+        // ✨ 改用 POST 获取列表
+        const res = await bridge.apiPost("get_gallery_list", {});
+        state.gallery = (res && Array.isArray(res.files)) ? res.files : [];
         state.selected_gallery_files.clear();
         renderGallery();
     } catch(e) { showToast("读取图库失败", "error"); }
@@ -170,7 +169,7 @@ async function init() {
     setupEventDelegation();
     renderPersonaImages();
     
-    fetchGallery(); // 初始拉取图库
+    fetchGallery();
 }
 
 function bindBasicFields() {
@@ -331,7 +330,6 @@ function setupEventDelegation() {
             document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
             document.getElementById(navItem.getAttribute('data-target')).classList.add('active');
             
-            // 切换到图库强制拉新
             if (navItem.getAttribute('data-target') === 'tab-gallery') fetchGallery();
             return;
         }
@@ -360,13 +358,12 @@ function setupEventDelegation() {
 
         if (e.target.closest('#persona-upload-trigger')) fileInput.click();
 
-        // ✨ 处理图库图片的选中逻辑
         const galleryItem = e.target.closest('.gallery-item-wrapper');
         if (galleryItem) {
             const filename = galleryItem.getAttribute('data-file');
             if (state.selected_gallery_files.has(filename)) state.selected_gallery_files.delete(filename);
             else state.selected_gallery_files.add(filename);
-            renderGallery(); // 重新渲染以更新打钩状态
+            renderGallery();
             return;
         }
 
@@ -377,7 +374,6 @@ function setupEventDelegation() {
 
         if (act === 'save-config') saveConfig(btn);
         
-        // ✨ 图库操作：全选/反选
         if (act === 'gallery-select-all') {
             const allSelected = state.selected_gallery_files.size === state.gallery.length;
             if (allSelected) state.selected_gallery_files.clear();
@@ -385,21 +381,19 @@ function setupEventDelegation() {
             renderGallery();
         }
         
-        // ✨ 图库操作：完美删除功能
         if (act === 'gallery-delete-selected') {
-            if (state.selected_gallery_files.size === 0) return showToast("请先点击选中要删除的图片", "error");
+            if (state.selected_gallery_files.size === 0) return showToast("请先点击选中要删除的文件", "error");
             if (!confirm(`确定要彻底物理删除这 ${state.selected_gallery_files.size} 张图片吗？该操作不可恢复！`)) return;
             
             btn.disabled = true;
             btn.innerHTML = "删除中...";
             try {
-                // 向后端发送包含文件名的 JSON payload
                 const payload = { filenames: Array.from(state.selected_gallery_files) };
                 const res = await bridge.apiPost("delete_gallery_images", payload);
                 if (res && res.success) {
                     showToast(`成功粉碎 ${res.count} 张图片！`);
                     state.selected_gallery_files.clear();
-                    await fetchGallery(); // 重新拉取最新的文件列表
+                    await fetchGallery();
                 } else {
                     showToast("删除请求未能完全执行", "error");
                 }
