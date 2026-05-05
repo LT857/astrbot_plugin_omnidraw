@@ -3,7 +3,7 @@ const bridge = window.AstrBotPluginPage;
 let state = {
     permission_config: {}, persona_config: { persona_ref_image: [] }, optimizer_config: {}, router_config: {},
     presets: [], providers: [], video_providers: [], verbose_report: false,
-    gallery: [], selected_gallery_files: new Set() // ✨ 注入图库状态
+    gallery: [], selected_gallery_files: new Set()
 };
 
 function showToast(message, type = 'success') {
@@ -16,7 +16,6 @@ function showToast(message, type = 'success') {
     setTimeout(() => toast.remove(), 2800);
 }
 
-// ✨ 瀑布流图库渲染引擎 (懒加载 Base64)
 async function renderGallery() {
     const container = document.getElementById('gallery-container');
     if(!container) return;
@@ -160,7 +159,7 @@ async function init() {
     setupEventDelegation();
     renderPersonaImages();
     
-    fetchGallery(); // ✨ 初始拉取图库数据
+    fetchGallery();
 }
 
 function bindBasicFields() {
@@ -313,7 +312,7 @@ function setupEventDelegation() {
         }
     };
 
-    document.body.addEventListener('click', async (e) => { // ✨ 升级为 async 以支持图库接口
+    document.body.addEventListener('click', async (e) => {
         const navItem = e.target.closest('.nav-item');
         if (navItem) {
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -321,7 +320,6 @@ function setupEventDelegation() {
             document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
             document.getElementById(navItem.getAttribute('data-target')).classList.add('active');
             
-            // ✨ 当切换到图库时强制刷新
             if (navItem.getAttribute('data-target') === 'tab-gallery') fetchGallery();
             return;
         }
@@ -350,7 +348,6 @@ function setupEventDelegation() {
 
         if (e.target.closest('#persona-upload-trigger')) fileInput.click();
 
-        // ✨ 处理图库图片的选中逻辑
         const galleryItem = e.target.closest('.gallery-item');
         if (galleryItem) {
             const filename = galleryItem.getAttribute('data-file');
@@ -367,7 +364,6 @@ function setupEventDelegation() {
 
         if (act === 'save-config') saveConfig(btn);
         
-        // ✨ 图库操作按钮事件
         if (act === 'gallery-select-all') {
             const allSelected = state.selected_gallery_files.size === state.gallery.length;
             if (allSelected) state.selected_gallery_files.clear();
@@ -375,18 +371,20 @@ function setupEventDelegation() {
             renderGallery();
         }
         
+        // ✨ 终极修复：如果前端发送没有 Header 的请求导致后端解析失败，现在前后端都做了双重保险
         if (act === 'gallery-delete-selected') {
-            if (state.selected_gallery_files.size === 0) return showToast("请先点击图片选中要删除的文件", "error");
-            if (!confirm(`确定要彻底物理删除这 ${state.selected_gallery_files.size} 张图片吗？该操作不可恢复！`)) return;
+            if (state.selected_gallery_files.size === 0) return showToast("请先点击图片进行选中！", "error");
+            if (!confirm(`确定要彻底物理删除这 ${state.selected_gallery_files.size} 张图片吗？此操作不可逆！`)) return;
             try {
-                const res = await bridge.apiPost("delete_gallery_images", { filenames: Array.from(state.selected_gallery_files) });
+                const payload = { filenames: Array.from(state.selected_gallery_files) };
+                const res = await bridge.apiPost("delete_gallery_images", payload);
                 if (res && res.success) {
-                    showToast(`成功销毁 ${res.count} 张图片！`);
-                    fetchGallery(); // 删除后重新拉取
+                    showToast(`成功粉碎 ${res.count} 张图片！`);
+                    fetchGallery(); 
                 } else {
-                    showToast("删除请求未响应", "error");
+                    showToast(res.message || "删除未完全成功", "error");
                 }
-            } catch(err) { showToast("删除异常", "error"); }
+            } catch(err) { showToast("删除通讯异常", "error"); }
         }
         
         if (act === 'add-preset') { state.presets.push({name:"", prompt:""}); renderPresets(); animateAdd('presets-container'); }
