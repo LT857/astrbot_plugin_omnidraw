@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.3.4
+
+- 修复 AstrBot 原生配置页在人设列表内部点击“管理文件”时提示 `Config item not found or not file type` 的问题。
+- 避开 AstrBot 当前不支持的 `template_list` 内嵌 `file` 结构，改为“当前激活人设参考图上传入口”负责原生上传，并自动同步到当前 active persona。
+- 增强 `files/...` 原生上传路径解析，确保原生配置页上传的参考图能被生图链路作为本地图片正常读取。
+
 ## 3.3.3
 
 - 恢复 AstrBot 原生插件配置入口，`_conf_schema.json` 现在覆盖 Pages 配置页可编辑的权限、链路、Provider、人设、副脑、预设和调试配置。

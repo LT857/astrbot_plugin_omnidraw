@@ -52,6 +52,7 @@ from .models import PLUGIN_AUTHOR, PLUGIN_NAME, PLUGIN_VERSION, PluginConfig
 from .utils import handle_errors
 
 PAGE_PREVIEW_IMAGE_BYTES = 80 * 1024 * 1024
+NATIVE_ACTIVE_PERSONA_FILE_PREFIX = "files/persona_config/persona_ref_image/"
 CONFIG_KEYS = {
     "permission_config",
     "persona_config",
@@ -139,6 +140,7 @@ class OmniDrawPlugin(Star):
     def _clean_runtime_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(config, dict):
             return {}
+
         def strip_template_keys(value: Any) -> Any:
             if isinstance(value, dict):
                 return {key: strip_template_keys(item) for key, item in value.items() if key != "__template_key"}
@@ -146,7 +148,91 @@ class OmniDrawPlugin(Star):
                 return [strip_template_keys(item) for item in value]
             return copy.deepcopy(value)
 
-        return {key: strip_template_keys(value) for key, value in config.items() if key in CONFIG_KEYS}
+        cleaned = {key: strip_template_keys(value) for key, value in config.items() if key in CONFIG_KEYS}
+        self._sync_native_active_persona_upload(cleaned)
+        return cleaned
+
+    def _sync_native_active_persona_upload(self, config: Dict[str, Any]) -> None:
+        persona_config = config.get("persona_config")
+        if not isinstance(persona_config, dict):
+            return
+
+        upload_refs = self._as_config_list(
+            persona_config.get("persona_ref_image") or persona_config.get("persona_ref_images")
+        )
+        if not any(self._is_native_file_ref(ref) for ref in upload_refs):
+            return
+
+        profiles = persona_config.get("profiles")
+        if not isinstance(profiles, list) or not profiles:
+            profiles = [{
+                "id": persona_config.get("active_persona_id") or "default",
+                "persona_name": persona_config.get("persona_name", "默认助理"),
+                "persona_base_prompt": persona_config.get("persona_base_prompt", ""),
+                "persona_ref_image": [],
+            }]
+            persona_config["profiles"] = profiles
+
+        active_profile = self._find_active_persona_profile(persona_config, profiles)
+        if active_profile is not None:
+            active_profile["persona_ref_image"] = upload_refs
+
+    def _as_config_list(self, value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return [item for item in value if item]
+        if isinstance(value, tuple):
+            return [item for item in value if item]
+        return [value] if value else []
+
+    def _find_active_persona_profile(self, persona_config: Dict[str, Any], profiles: List[Any]) -> Optional[Dict[str, Any]]:
+        active_id = str(persona_config.get("active_persona_id") or "").strip().lower()
+        dict_profiles = [profile for profile in profiles if isinstance(profile, dict)]
+        if not dict_profiles:
+            return None
+        if active_id:
+            for profile in dict_profiles:
+                if str(profile.get("id") or "").strip().lower() == active_id:
+                    return profile
+        return dict_profiles[0]
+
+    def _is_native_file_ref(self, image_ref: Any) -> bool:
+        return str(image_ref or "").replace("\\", "/").lstrip("/").startswith("files/")
+
+    def _native_file_ref_for_config(self, image_ref: Any) -> str:
+        if not image_ref:
+            return ""
+        normalized = str(image_ref).replace("\\", "/").lstrip("/")
+        if normalized.startswith(NATIVE_ACTIVE_PERSONA_FILE_PREFIX):
+            return normalized
+        if not os.path.isabs(str(image_ref)):
+            return ""
+
+        plugin_data_dir = os.path.abspath(self.data_dir)
+        abs_ref = os.path.abspath(str(image_ref))
+        try:
+            common = os.path.commonpath([plugin_data_dir, abs_ref])
+        except ValueError:
+            return ""
+        if common != plugin_data_dir:
+            return ""
+        rel_ref = os.path.relpath(abs_ref, plugin_data_dir).replace("\\", "/")
+        if rel_ref.startswith(NATIVE_ACTIVE_PERSONA_FILE_PREFIX):
+            return rel_ref
+        return ""
+
+    def _native_active_persona_file_refs(self, persona_config: Dict[str, Any]) -> List[str]:
+        profiles = persona_config.get("profiles")
+        if not isinstance(profiles, list):
+            return []
+        active_profile = self._find_active_persona_profile(persona_config, profiles)
+        if not active_profile:
+            return []
+        refs = []
+        for ref in self._as_config_list(active_profile.get("persona_ref_image")):
+            native_ref = self._native_file_ref_for_config(ref)
+            if native_ref and native_ref not in refs:
+                refs.append(native_ref)
+        return refs
 
     def _config_for_native_page(self) -> Dict[str, Any]:
         native_config = copy.deepcopy(self.raw_config)
@@ -168,6 +254,7 @@ class OmniDrawPlugin(Star):
         persona_config = native_config.get("persona_config")
         if isinstance(persona_config, dict):
             persona_config["profiles"] = mark_template_items(persona_config.get("profiles", []), "persona")
+            persona_config["persona_ref_image"] = self._native_active_persona_file_refs(persona_config)
         return native_config
 
     def _has_config_payload(self, config: Dict[str, Any]) -> bool:

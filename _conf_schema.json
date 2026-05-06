@@ -204,8 +204,8 @@
               },
               "persona_ref_image": {
                 "description": "人设参考图组",
-                "type": "file",
-                "hint": "可上传多张参考图；也可以继续使用 Pages 保存下来的本地图片路径。",
+                "type": "list",
+                "hint": "每行一个图片地址。支持 Pages 保存的本地路径、图片 URL、data:image，或下方“当前激活人设参考图上传入口”上传后生成的 files/... 路径。注意：AstrBot 原生配置页暂不支持在多条目模板内部直接上传文件。",
                 "default": []
               }
             }
@@ -215,20 +215,23 @@
       "persona_name": {
         "description": "当前人设名称（兼容字段）",
         "type": "string",
-        "hint": "插件会自动同步为当前 active_persona_id 对应的人设名称。",
-        "default": "默认助理"
+        "hint": "插件会自动同步为当前 active_persona_id 对应的人设名称。请优先在上方人设列表中编辑。",
+        "default": "默认助理",
+        "invisible": true
       },
       "persona_base_prompt": {
         "description": "当前人设基础描述（兼容字段）",
         "type": "text",
-        "hint": "插件会自动同步为当前 active_persona_id 对应的人设描述。",
-        "default": ""
+        "hint": "插件会自动同步为当前 active_persona_id 对应的人设描述。请优先在上方人设列表中编辑。",
+        "default": "",
+        "invisible": true
       },
       "persona_ref_image": {
-        "description": "当前人设参考图（兼容字段）",
+        "description": "当前激活人设参考图上传入口",
         "type": "file",
-        "hint": "插件会自动同步为当前 active_persona_id 对应的人设参考图。",
-        "default": []
+        "hint": "这里用于 AstrBot 原生配置页上传图片。上传并保存后，插件会把文件同步到 active_persona_id 对应的人设参考图组；多个人设的参考图也可在上方人设列表中填写 paths/URL，或到 Pages / 插件配置中管理。",
+        "default": [],
+        "file_types": ["png", "jpg", "jpeg", "webp", "gif"]
       }
     }
   },

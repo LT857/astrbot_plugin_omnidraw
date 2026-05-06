@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 PLUGIN_NAME = "astrbot_plugin_omnidraw"
 PLUGIN_AUTHOR = "雪碧bir"
-PLUGIN_VERSION = "3.3.3"
+PLUGIN_VERSION = "3.3.4"
 
 
 @dataclass
@@ -374,6 +374,7 @@ def _normalize_persona_id(raw_id: Any, name: str, index: int, used_ids: Set[str]
 def _process_persona_images(raw_images: Any, refs_dir: str, cleanup: bool = True) -> List[str]:
     os.makedirs(refs_dir, exist_ok=True)
     processed_images = []
+    plugin_data_dir = os.path.abspath(os.path.dirname(refs_dir))
 
     for idx, img_data in enumerate(_as_list(raw_images)):
         if not img_data:
@@ -386,11 +387,27 @@ def _process_persona_images(raw_images: Any, refs_dir: str, cleanup: bool = True
             if saved_path:
                 processed_images.append(saved_path)
         else:
+            img_ref = _resolve_plugin_file_ref(img_ref, plugin_data_dir)
             processed_images.append(img_ref)
 
     if cleanup:
         _cleanup_unused_persona_refs(refs_dir, processed_images)
     return processed_images
+
+
+def _resolve_plugin_file_ref(image_ref: str, plugin_data_dir: str) -> str:
+    normalized = image_ref.replace("\\", "/").lstrip("/")
+    if not normalized.startswith("files/"):
+        return image_ref
+
+    abs_path = os.path.abspath(os.path.join(plugin_data_dir, *normalized.split("/")))
+    try:
+        common = os.path.commonpath([plugin_data_dir, abs_path])
+    except ValueError:
+        return image_ref
+    if common != plugin_data_dir:
+        return image_ref
+    return abs_path
 
 
 def _is_page_preview_ref(image_ref: str) -> bool:
