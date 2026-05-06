@@ -1,8 +1,302 @@
 {
-    "migration_hint": {
-        "title": "配置说明",
-        "description": "配置说明",
+  "permission_config": {
+    "description": "权限控制",
+    "type": "object",
+    "hint": "留空表示所有用户都可以使用；填写 QQ 号后，仅列表中的用户可调用绘图、自拍、视频等指令。",
+    "items": {
+      "allowed_users": {
+        "description": "允许使用的 QQ 号",
         "type": "text",
-        "default": "【万象画卷】高级配置已迁移。请单击「万象画卷」插件卡片，前往 settings 页面进行可视化配置。"
+        "hint": "可按行、英文逗号或空格分隔，例如：123456, 234567。",
+        "default": ""
+      }
     }
+  },
+  "router_config": {
+    "description": "模型链路路由",
+    "type": "object",
+    "hint": "填写下方 Provider 的节点 ID。多个节点可用英文逗号或换行分隔，插件会按顺序兜底。",
+    "items": {
+      "chain_text2img": {
+        "description": "文生图 / 图生图链路",
+        "type": "string",
+        "hint": "默认 node_1。可填写多个图像节点 ID，例如：node_1,node_2。",
+        "default": "node_1"
+      },
+      "chain_selfie": {
+        "description": "自拍链路",
+        "type": "string",
+        "hint": "默认 node_1。自拍会使用当前人设的参考图组。",
+        "default": "node_1"
+      },
+      "chain_video": {
+        "description": "视频链路",
+        "type": "string",
+        "hint": "默认 video_node_1。可填写多个视频节点 ID。",
+        "default": "video_node_1"
+      }
+    }
+  },
+  "providers": {
+    "description": "图像 Provider",
+    "type": "template_list",
+    "hint": "配置文生图、图生图、自拍使用的图像模型节点。节点 ID 需要和上方链路配置一致。",
+    "default": [],
+    "templates": {
+      "image_provider": {
+        "name": "图像节点",
+        "items": {
+          "id": {
+            "description": "节点 ID",
+            "type": "string",
+            "hint": "例如 node_1。链路配置里要填写同一个 ID。",
+            "default": ""
+          },
+          "api_type": {
+            "description": "接口模式",
+            "type": "string",
+            "options": [
+              "openai_image",
+              "openai_chat"
+            ],
+            "hint": "openai_image 适合标准图片接口；openai_chat 适合通过 chat/completions 透传生图的中转站。",
+            "default": "openai_image"
+          },
+          "base_url": {
+            "description": "接口地址",
+            "type": "string",
+            "hint": "通常需要包含 /v1，例如 https://api.example.com/v1。",
+            "default": ""
+          },
+          "api_keys": {
+            "description": "API Keys",
+            "type": "text",
+            "hint": "可填写一个或多个 key，多个 key 建议按行填写。",
+            "default": ""
+          },
+          "model": {
+            "description": "当前模型",
+            "type": "string",
+            "hint": "当前默认使用的模型名，应同时存在于下方模型池中。",
+            "default": ""
+          },
+          "available_models": {
+            "description": "模型池",
+            "type": "list",
+            "hint": "可切换模型列表。每行一个模型名，例如 gpt-image-1。",
+            "default": []
+          },
+          "timeout": {
+            "description": "请求超时（秒）",
+            "type": "float",
+            "hint": "图片建议 120-300；较慢接口可调高。",
+            "default": 60
+          }
+        }
+      }
+    }
+  },
+  "video_providers": {
+    "description": "视频 Provider",
+    "type": "template_list",
+    "hint": "配置 /视频 指令和 LLM 视频工具使用的视频模型节点。",
+    "default": [],
+    "templates": {
+      "video_provider": {
+        "name": "视频节点",
+        "items": {
+          "id": {
+            "description": "节点 ID",
+            "type": "string",
+            "hint": "例如 video_node_1。链路配置里要填写同一个 ID。",
+            "default": ""
+          },
+          "api_type": {
+            "description": "调用协议",
+            "type": "string",
+            "options": [
+              "async_task",
+              "openai_sync",
+              "openai_chat"
+            ],
+            "hint": "async_task 为提交后轮询；openai_sync 为同步阻塞；openai_chat 为 chat/completions 伪装视频生成。",
+            "default": "async_task"
+          },
+          "base_url": {
+            "description": "接口地址",
+            "type": "string",
+            "hint": "通常需要包含 /v1 或 /v2，按你的中转站文档填写。",
+            "default": ""
+          },
+          "api_keys": {
+            "description": "API Keys",
+            "type": "text",
+            "hint": "可填写一个或多个 key，多个 key 建议按行填写。",
+            "default": ""
+          },
+          "model": {
+            "description": "当前模型",
+            "type": "string",
+            "hint": "当前默认使用的视频模型名。",
+            "default": ""
+          },
+          "available_models": {
+            "description": "视频模型池",
+            "type": "list",
+            "hint": "可切换视频模型列表。每行一个模型名。",
+            "default": []
+          },
+          "timeout": {
+            "description": "请求超时（秒）",
+            "type": "float",
+            "hint": "视频生成通常较慢，建议 300 或更高。",
+            "default": 300
+          }
+        }
+      }
+    }
+  },
+  "persona_config": {
+    "description": "多组人设与参考图",
+    "type": "object",
+    "hint": "用于 /自拍。每个人设拥有独立名称、基础提示词和参考图组；active_persona_id 决定当前启用的人设。",
+    "items": {
+      "active_persona_id": {
+        "description": "当前启用人设 ID",
+        "type": "string",
+        "hint": "填写 profiles 中某个人设的 id，例如 default 或 persona_2。",
+        "default": "default"
+      },
+      "profiles": {
+        "description": "人设列表",
+        "type": "template_list",
+        "hint": "可添加多个人设。参考图可上传文件，也可保存 Pages 中已有的本地路径。",
+        "default": [
+          {
+            "__template_key": "persona",
+            "id": "default",
+            "persona_name": "默认助理",
+            "persona_base_prompt": "",
+            "persona_ref_image": []
+          }
+        ],
+        "templates": {
+          "persona": {
+            "name": "人设",
+            "items": {
+              "id": {
+                "description": "人设 ID",
+                "type": "string",
+                "hint": "建议使用英文、数字、下划线或短横线，例如 default、persona_2。",
+                "default": ""
+              },
+              "persona_name": {
+                "description": "人设名称",
+                "type": "string",
+                "hint": "显示名称，可用中文。",
+                "default": "默认助理"
+              },
+              "persona_base_prompt": {
+                "description": "人设基础描述",
+                "type": "text",
+                "hint": "长期固定的人物外貌、气质、服装习惯等描述。自拍时会和用户动作一起组合。",
+                "default": ""
+              },
+              "persona_ref_image": {
+                "description": "人设参考图组",
+                "type": "file",
+                "hint": "可上传多张参考图；也可以继续使用 Pages 保存下来的本地图片路径。",
+                "default": []
+              }
+            }
+          }
+        }
+      },
+      "persona_name": {
+        "description": "当前人设名称（兼容字段）",
+        "type": "string",
+        "hint": "插件会自动同步为当前 active_persona_id 对应的人设名称。",
+        "default": "默认助理"
+      },
+      "persona_base_prompt": {
+        "description": "当前人设基础描述（兼容字段）",
+        "type": "text",
+        "hint": "插件会自动同步为当前 active_persona_id 对应的人设描述。",
+        "default": ""
+      },
+      "persona_ref_image": {
+        "description": "当前人设参考图（兼容字段）",
+        "type": "file",
+        "hint": "插件会自动同步为当前 active_persona_id 对应的人设参考图。",
+        "default": []
+      }
+    }
+  },
+  "optimizer_config": {
+    "description": "副脑提示词优化",
+    "type": "object",
+    "hint": "副脑会把用户的简短描述整理成更适合图像模型理解的英文提示词。",
+    "items": {
+      "enable_optimizer": {
+        "description": "启用副脑",
+        "type": "bool",
+        "default": true
+      },
+      "optimizer_style": {
+        "description": "内置风格",
+        "type": "string",
+        "options": [
+          "手机日常原生感",
+          "自拍专用极致真实",
+          "电影感写真",
+          "商业产品摄影",
+          "二次元精修",
+          "自定义模式"
+        ],
+        "hint": "自拍建议使用“自拍专用极致真实”。选择自定义模式时请填写下方自定义风格提示词。",
+        "default": "手机日常原生感"
+      },
+      "chain_optimizer": {
+        "description": "副脑使用的图像 Provider 节点",
+        "type": "string",
+        "hint": "填写 providers 中可调用文本/对话模型的节点 ID，通常可复用图像节点。",
+        "default": "node_1"
+      },
+      "optimizer_model": {
+        "description": "副脑模型名",
+        "type": "string",
+        "hint": "用于优化提示词的模型名，例如 gpt-4o-mini、gemini-3-pro-preview。",
+        "default": "gpt-4o-mini"
+      },
+      "optimizer_timeout": {
+        "description": "副脑超时（秒）",
+        "type": "float",
+        "default": 15
+      },
+      "max_batch_count": {
+        "description": "一次请求最多生成几组提示词",
+        "type": "int",
+        "hint": "0 表示不启用批量扩写限制；需要副脑支持。",
+        "default": 0
+      },
+      "optimizer_custom_prompt": {
+        "description": "自定义风格提示词",
+        "type": "text",
+        "hint": "仅在风格选择“自定义模式”时使用。",
+        "default": ""
+      }
+    }
+  },
+  "presets": {
+    "description": "快捷预设",
+    "type": "list",
+    "hint": "格式：预设名:底层提示词。例如 写真:daily smartphone portrait。",
+    "default": []
+  },
+  "verbose_report": {
+    "description": "输出详细调试日志",
+    "type": "bool",
+    "hint": "排查接口耗时、发送耗时、链路问题时可开启；日常使用建议关闭。",
+    "default": false
+  }
 }

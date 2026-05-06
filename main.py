@@ -7,6 +7,7 @@ import asyncio
 import base64
 import binascii
 import copy
+import hashlib
 import json
 import mimetypes
 import os
@@ -51,6 +52,16 @@ from .models import PLUGIN_AUTHOR, PLUGIN_NAME, PLUGIN_VERSION, PluginConfig
 from .utils import handle_errors
 
 PAGE_PREVIEW_IMAGE_BYTES = 80 * 1024 * 1024
+CONFIG_KEYS = {
+    "permission_config",
+    "persona_config",
+    "optimizer_config",
+    "router_config",
+    "presets",
+    "providers",
+    "video_providers",
+    "verbose_report",
+}
 
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, f"万象画卷 v{PLUGIN_VERSION}", PLUGIN_VERSION)
@@ -63,9 +74,16 @@ class OmniDrawPlugin(Star):
         self.config_path = os.path.join(self.data_dir, "omnidraw_persist_config.json")
         self._background_tasks = set()
         self._page_image_tokens: Dict[str, str] = {}
+        self._native_config = config if hasattr(config, "save_config") else None
+        self._native_config_path = str(getattr(config, "config_path", "") or "")
+        self._native_config_mtime = self._get_mtime(self._native_config_path)
+        self._native_config_signature = self._file_signature(self._native_config_path)
+        self._persist_config_mtime = self._get_mtime(self.config_path)
 
         self.cmd_parser = CommandParser()
         self._apply_runtime_config(self._load_initial_config(config or {}))
+        self._persist_config()
+        self._safe_update_context_config()
 
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/get_config",
@@ -90,20 +108,161 @@ class OmniDrawPlugin(Star):
         base_data_dir = str(get_astrbot_data_path())
         return os.path.join(base_data_dir, "plugin_data", PLUGIN_NAME)
 
+    def _get_mtime(self, path: str) -> float:
+        if not path:
+            return 0.0
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    def _file_signature(self, path: str) -> str:
+        if not path:
+            return ""
+        try:
+            with open(path, "rb") as file:
+                return hashlib.sha256(file.read()).hexdigest()
+        except OSError:
+            return ""
+
+    def _load_json_file(self, path: str) -> Dict[str, Any]:
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8-sig") as file:
+                data = json.load(file)
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.error(f"[OmniDraw] 读取配置失败: {path} {exc}", exc_info=True)
+            return {}
+
+    def _clean_runtime_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(config, dict):
+            return {}
+        def strip_template_keys(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: strip_template_keys(item) for key, item in value.items() if key != "__template_key"}
+            if isinstance(value, list):
+                return [strip_template_keys(item) for item in value]
+            return copy.deepcopy(value)
+
+        return {key: strip_template_keys(value) for key, value in config.items() if key in CONFIG_KEYS}
+
+    def _config_for_native_page(self) -> Dict[str, Any]:
+        native_config = copy.deepcopy(self.raw_config)
+
+        def mark_template_items(items: Any, template_key: str) -> List[Any]:
+            if not isinstance(items, list):
+                return []
+            marked = []
+            for item in items:
+                if isinstance(item, dict):
+                    item = copy.deepcopy(item)
+                    item["__template_key"] = str(item.get("__template_key") or template_key)
+                marked.append(item)
+            return marked
+
+        native_config["providers"] = mark_template_items(native_config.get("providers", []), "image_provider")
+        native_config["video_providers"] = mark_template_items(native_config.get("video_providers", []), "video_provider")
+
+        persona_config = native_config.get("persona_config")
+        if isinstance(persona_config, dict):
+            persona_config["profiles"] = mark_template_items(persona_config.get("profiles", []), "persona")
+        return native_config
+
+    def _has_config_payload(self, config: Dict[str, Any]) -> bool:
+        if not isinstance(config, dict):
+            return False
+        if config.get("providers") or config.get("video_providers") or config.get("presets"):
+            return True
+        if config.get("verbose_report"):
+            return True
+
+        permission_config = config.get("permission_config")
+        if isinstance(permission_config, dict) and str(permission_config.get("allowed_users", "")).strip():
+            return True
+
+        router_config = config.get("router_config")
+        if isinstance(router_config, dict):
+            route_defaults = {
+                "chain_text2img": "node_1",
+                "chain_selfie": "node_1",
+                "chain_video": "video_node_1",
+            }
+            for key, default in route_defaults.items():
+                value = router_config.get(key)
+                if value not in (None, "", default):
+                    return True
+
+        optimizer_config = config.get("optimizer_config")
+        if isinstance(optimizer_config, dict):
+            optimizer_defaults = {
+                "enable_optimizer": True,
+                "optimizer_style": "手机日常原生感",
+                "chain_optimizer": "node_1",
+                "optimizer_model": "gpt-4o-mini",
+                "optimizer_timeout": 15,
+                "max_batch_count": 0,
+                "optimizer_custom_prompt": "",
+            }
+            for key, default in optimizer_defaults.items():
+                value = optimizer_config.get(key)
+                if value not in (None, "", default):
+                    return True
+
+        persona_config = config.get("persona_config")
+        if isinstance(persona_config, dict):
+            if persona_config.get("active_persona_id") not in (None, "", "default"):
+                return True
+            profiles = persona_config.get("profiles")
+            if isinstance(profiles, list) and profiles:
+                for index, profile in enumerate(profiles):
+                    if not isinstance(profile, dict):
+                        continue
+                    default_name = "默认助理" if index == 0 else f"人设 {index + 1}"
+                    if str(profile.get("id", "")).strip() not in ("", "default" if index == 0 else f"persona_{index + 1}"):
+                        return True
+                    if str(profile.get("persona_name", "")).strip() not in ("", default_name):
+                        return True
+                    if str(profile.get("persona_base_prompt", "")).strip():
+                        return True
+                    if profile.get("persona_ref_image"):
+                        return True
+            if str(persona_config.get("persona_name", "")).strip() not in ("", "默认助理"):
+                return True
+            if str(persona_config.get("persona_base_prompt", "")).strip():
+                return True
+            if persona_config.get("persona_ref_image") or persona_config.get("persona_ref_images"):
+                return True
+        return False
+
     def _load_initial_config(self, fallback_config: Dict[str, Any]) -> Dict[str, Any]:
+        native_config = self._clean_runtime_config(dict(fallback_config)) if isinstance(fallback_config, dict) else {}
+        native_has_payload = self._has_config_payload(native_config)
+        persisted_config = self._clean_runtime_config(self._load_json_file(self.config_path))
+        persisted_has_payload = self._has_config_payload(persisted_config)
+
+        if native_has_payload:
+            if not persisted_has_payload or self._native_config_mtime >= self._persist_config_mtime:
+                return native_config
+            return persisted_config
+        if persisted_has_payload:
+            return persisted_config
+        if native_config:
+            return native_config
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as file:
                     data = json.load(file)
                 if isinstance(data, dict):
-                    return data
-                logger.warning("[OmniDraw] 本地配置不是 JSON 对象，已回退到 AstrBot 配置。")
+                    return self._clean_runtime_config(data)
+                logger.warning("[OmniDraw] 本地配置不是 JSON 对象，已回退到 AstrBot 原生配置。")
             except Exception as exc:
                 logger.error(f"[OmniDraw] 读取本地持久化配置失败: {exc}", exc_info=True)
-        return copy.deepcopy(fallback_config) if isinstance(fallback_config, dict) else {}
+        return native_config
 
     def _apply_runtime_config(self, raw_config: Dict[str, Any]) -> None:
-        self.raw_config = raw_config if isinstance(raw_config, dict) else {}
+        self.raw_config = self._clean_runtime_config(raw_config if isinstance(raw_config, dict) else {})
         self.plugin_config = PluginConfig.from_dict(self.raw_config, self.data_dir)
         self.persona_manager = PersonaManager(self.plugin_config)
         self.video_manager = VideoManager(self.plugin_config)
@@ -115,8 +274,21 @@ class OmniDrawPlugin(Star):
         with open(tmp_path, "w", encoding="utf-8") as file:
             json.dump(self.raw_config, file, ensure_ascii=False, indent=4)
         os.replace(tmp_path, self.config_path)
+        self._persist_config_mtime = self._get_mtime(self.config_path)
 
     def _safe_update_context_config(self) -> None:
+        if self._native_config is not None and hasattr(self._native_config, "save_config"):
+            try:
+                native_config = self._config_for_native_page()
+                self._native_config.clear()
+                self._native_config.update(native_config)
+                self._native_config.save_config()
+                self._native_config_mtime = self._get_mtime(self._native_config_path)
+                self._native_config_signature = self._file_signature(self._native_config_path)
+                return
+            except Exception as exc:
+                logger.warning(f"[OmniDraw] AstrBot 原生配置同步失败，已保留本地持久化配置: {exc}")
+
         if not hasattr(self.context, "update_config"):
             return
         try:
@@ -124,7 +296,29 @@ class OmniDrawPlugin(Star):
         except Exception as exc:
             logger.warning(f"[OmniDraw] AstrBot 主配置同步失败，已保留本地持久化配置: {exc}")
 
+    def _refresh_from_native_config_if_changed(self) -> None:
+        if not self._native_config_path:
+            return
+        current_mtime = self._get_mtime(self._native_config_path)
+        current_signature = self._file_signature(self._native_config_path)
+        if current_signature and current_signature == self._native_config_signature:
+            return
+        native_config = self._clean_runtime_config(self._load_json_file(self._native_config_path))
+        if not native_config:
+            self._native_config_mtime = current_mtime
+            self._native_config_signature = current_signature
+            return
+        self._apply_runtime_config(native_config)
+        self._persist_config()
+        self._native_config_mtime = current_mtime
+        self._native_config_signature = current_signature
+        if self._native_config is not None:
+            self._native_config.clear()
+            self._native_config.update(self._config_for_native_page())
+        logger.info("[OmniDraw] 已从 AstrBot 原生配置热同步最新设置。")
+
     async def get_config_handler(self):
+        self._refresh_from_native_config_if_changed()
         return jsonify(self._config_for_page())
 
     def _config_for_page(self) -> Dict[str, Any]:
@@ -423,6 +617,7 @@ class OmniDrawPlugin(Star):
         return min(max(1, parsed_count), max(1, limit))
 
     def _has_permission(self, event: AstrMessageEvent) -> bool:
+        self._refresh_from_native_config_if_changed()
         allowed = self.plugin_config.allowed_users
         if not allowed:
             return True

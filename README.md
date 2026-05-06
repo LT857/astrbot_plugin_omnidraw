@@ -52,6 +52,8 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 
 如果刚打开页面没有数据，先刷新 AstrBot 后台或重载插件。
 
+你也可以直接在 AstrBot 原生插件配置处编辑 `_conf_schema.json` 展示出来的配置项。原生配置页和 `Pages / 插件配置` 使用同一套配置结构：在 Pages 保存会同步回原生配置；在原生配置页保存后，重载插件或重新打开 Pages 会读取最新配置。
+
 ### 3. 配置画图模型
 
 最少需要配置一个画图 Provider。常见字段含义如下：
