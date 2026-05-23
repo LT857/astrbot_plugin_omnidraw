@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .constants import (
+    APIType,
+    DEFAULT_GEMINI_MODEL,
     DEFAULT_DRAW_ERROR_MESSAGE,
     DEFAULT_DRAW_PENDING_MESSAGE,
     DEFAULT_SELFIE_ERROR_MESSAGE,
@@ -339,11 +341,13 @@ def _normalize_api_type(value: Any, is_video: bool) -> str:
         if "sync" in lowered or "同步" in raw:
             return "openai_sync"
         return "async_task"
+    if lowered in {"gemini", "gemini_official", "google_gemini"} or "gemini" in lowered or "gemini" in raw.lower():
+        return APIType.GEMINI_OFFICIAL
     if lowered in {"custom_endpoint", "custom"} or "自定义" in raw:
-        return "custom_endpoint"
+        return APIType.CUSTOM_ENDPOINT
     if "chat" in lowered or "对话" in raw:
-        return "openai_chat"
-    return "openai_image"
+        return APIType.OPENAI_CHAT
+    return APIType.OPENAI_IMAGE
 
 
 def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
@@ -360,13 +364,16 @@ def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
         model = model.split(",", 1)[0].strip()
     if not model and available_models:
         model = available_models[0]
+    api_type = _normalize_api_type(raw_provider.get("api_type", raw_provider.get("接口模式", "")), is_video)
+    if api_type == APIType.GEMINI_OFFICIAL and not model:
+        model = DEFAULT_GEMINI_MODEL
     if model and model not in available_models:
         available_models.insert(0, model)
 
     default_timeout = 300.0 if is_video else 60.0
     return ProviderConfig(
         id=str(raw_provider.get("id", raw_provider.get("节点ID", ""))).strip(),
-        api_type=_normalize_api_type(raw_provider.get("api_type", raw_provider.get("接口模式", "")), is_video),
+        api_type=api_type,
         base_url=str(
             raw_provider.get(
                 "base_url",
