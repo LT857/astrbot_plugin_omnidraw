@@ -55,11 +55,7 @@ class VideoManager:
 
     def _format_elapsed(self, elapsed_seconds: float) -> str:
         seconds = max(0.0, float(elapsed_seconds or 0.0))
-        if seconds < 60:
-            return f"{seconds:.1f} 秒"
-        minutes = int(seconds // 60)
-        remainder = seconds - (minutes * 60)
-        return f"{minutes} 分 {remainder:.1f} 秒"
+        return f"{seconds:.1f}s"
 
     def _build_success_text(self, elapsed_seconds: float, model: str) -> str:
         lines = ["🎬 当当当！你要求的视频渲染完成啦："]

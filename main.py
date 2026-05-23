@@ -1483,11 +1483,7 @@ class OmniDrawPlugin(Star):
             seconds = max(0.0, float(elapsed_seconds))
         except (TypeError, ValueError):
             seconds = 0.0
-        if seconds < 60:
-            return f"{seconds:.1f} 秒"
-        minutes = int(seconds // 60)
-        remainder = seconds - (minutes * 60)
-        return f"{minutes} 分 {remainder:.1f} 秒"
+        return f"{seconds:.1f}s"
 
     def _generation_metadata_lines(
         self,
