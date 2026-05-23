@@ -12,6 +12,10 @@ const defaultCacheConfig = {
     max_cache_size_mb: 512
 };
 
+const GEMINI_OFFICIAL_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+const GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-image-preview";
+const GEMINI_DEFAULT_MODELS = [GEMINI_DEFAULT_MODEL, "gemini-3-pro-image-preview"];
+
 const mockConfig = {
     permission_config: { usable_users: "", allowed_users: "", blocked_users: "", unlimited_groups: "" },
     usage_config: {
@@ -154,6 +158,24 @@ function normalizeModelList(value) {
 
 function normalizeTextAreaKeys(value) {
     return Array.isArray(value) ? value.join("\n") : String(value || "");
+}
+
+function mergeUniqueModels(...groups) {
+    return [...new Set(groups.flat().map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function applyImageProviderDefaults(provider) {
+    if (!provider || provider.api_type !== "gemini_official") return provider;
+    if (!String(provider.base_url || "").trim() || provider.base_url === "https://api.example.com/v1") {
+        provider.base_url = GEMINI_OFFICIAL_BASE_URL;
+    }
+    provider.available_models = mergeUniqueModels(provider.available_models || [], GEMINI_DEFAULT_MODELS);
+    if (!String(provider.model || "").trim()) {
+        provider.model = provider.available_models[0] || GEMINI_DEFAULT_MODEL;
+    }
+    const timeout = parseFloat(provider.timeout);
+    provider.timeout = Number.isFinite(timeout) && timeout >= 120 ? timeout : 120;
+    return provider;
 }
 
 function readNonnegativeIntInput(id, fallback = 0) {
@@ -838,6 +860,7 @@ function renderProviderCard(p, i, isVideo) {
         : [
             ["openai_image", "标准生图"],
             ["openai_chat", "对话透传"],
+            ["gemini_official", "Gemini"],
             ["custom_endpoint", "自定义"]
         ];
 
@@ -1187,7 +1210,10 @@ function setupEventDelegation() {
             const sync = apiChip.getAttribute("data-sync");
             const idx = parseInt(apiChip.getAttribute("data-index"), 10);
             const val = apiChip.getAttribute("data-val");
-            if (sync === "prov-api") state.providers[idx].api_type = val;
+            if (sync === "prov-api") {
+                state.providers[idx].api_type = val;
+                applyImageProviderDefaults(state.providers[idx]);
+            }
             if (sync === "vid-api") state.video_providers[idx].api_type = val;
             if (sync === "prov-model-select") state.providers[idx].model = val;
             if (sync === "vid-model-select") state.video_providers[idx].model = val;

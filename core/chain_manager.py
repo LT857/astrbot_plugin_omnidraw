@@ -6,6 +6,7 @@ from typing import Any
 
 import aiohttp
 from astrbot.api import logger
+from ..constants import APIType
 from ..models import PluginConfig
 from ..providers import create_provider
 
@@ -53,7 +54,10 @@ class ChainManager:
                 skipped_errors.append(f"{provider_id}: 节点不存在")
                 logger.warning(f"⚠️ 链路 [{chain_name}] 中的节点 [{provider_id}] 不存在。")
                 continue
-            if not provider_config.base_url or not provider_config.model:
+            if (
+                (not provider_config.base_url or not provider_config.model)
+                and provider_config.api_type != APIType.GEMINI_OFFICIAL
+            ):
                 skipped_errors.append(f"{provider_id}: 缺少接口地址或模型")
                 logger.warning(f"⚠️ 链路 [{chain_name}] 中的节点 [{provider_id}] 缺少接口地址或模型。")
                 continue

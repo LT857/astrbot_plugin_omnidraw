@@ -5,6 +5,7 @@ from ..models import ProviderConfig
 from ..constants import APIType
 from .base import BaseProvider
 from .custom_endpoint_impl import CustomEndpointProvider
+from .gemini_official_impl import GeminiOfficialProvider
 from .openai_impl import OpenAIProvider
 from .openai_chat_impl import OpenAIChatProvider
 
@@ -15,6 +16,8 @@ def create_provider(config: ProviderConfig, session: aiohttp.ClientSession) -> B
     # ===== 加入了 openai_chat 的识别分支 =====
     elif config.api_type == APIType.OPENAI_CHAT:
         return OpenAIChatProvider(config, session)
+    elif config.api_type == APIType.GEMINI_OFFICIAL:
+        return GeminiOfficialProvider(config, session)
     elif config.api_type == APIType.CUSTOM_ENDPOINT:
         return CustomEndpointProvider(config, session)
     else:

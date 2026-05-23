@@ -354,6 +354,52 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
             return ""
         return walk(value)
 
+    def from_inline_data(value: Any) -> str:
+        if not isinstance(value, dict):
+            return ""
+        if "mimeType" not in value and "mime_type" not in value:
+            return ""
+        data_value = value.get("data")
+        if not isinstance(data_value, str):
+            return ""
+        data = data_value.strip()
+        if not data:
+            return ""
+        mime_type = str(value.get("mimeType") or value.get("mime_type") or "image/png").strip() or "image/png"
+        if not mime_type.split(";", 1)[0].lower().startswith("image/"):
+            return ""
+        compact_data = re.sub(r"\s+", "", data)
+        try:
+            base64.b64decode(compact_data, validate=True)
+        except Exception:
+            return ""
+        return f"data:{mime_type};base64,{compact_data}"
+
+    def from_gemini_candidates(value: Any) -> str:
+        if not isinstance(value, dict):
+            return ""
+        candidates = value.get("candidates")
+        if not isinstance(candidates, list):
+            return ""
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content") or {}
+            parts = content.get("parts") if isinstance(content, dict) else None
+            if not isinstance(parts, list):
+                continue
+            last_inline_image = ""
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                for key in ("inlineData", "inline_data"):
+                    image = from_inline_data(part.get(key))
+                    if image:
+                        last_inline_image = image
+            if last_inline_image:
+                return last_inline_image
+        return ""
+
     def walk(value: Any) -> str:
         if isinstance(value, str):
             return from_text(value)
@@ -365,6 +411,15 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
             return ""
         if not isinstance(value, dict):
             return ""
+
+        gemini_image = from_gemini_candidates(value)
+        if gemini_image:
+            return gemini_image
+
+        for key in ("inlineData", "inline_data"):
+            image = from_inline_data(value.get(key))
+            if image:
+                return image
 
         if value.get("type") == "image_generation_call" and value.get("result"):
             image = coerce_image_value(value.get("result"), assume_base64=True)
@@ -411,6 +466,10 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
             "message",
             "content",
             "text",
+            "candidates",
+            "parts",
+            "inlineData",
+            "inline_data",
             "artifacts",
             "generations",
         ):
