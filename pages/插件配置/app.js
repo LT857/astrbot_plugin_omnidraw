@@ -1446,7 +1446,7 @@ async function init() {
     state.providers = (rawConfig.providers || []).map((p) => {
         const availableModels = normalizeModelList(p.available_models?.length ? p.available_models : (p.model || p["模型名称"] || ""));
         const model = p.model && !String(p.model).includes(",") ? p.model : (availableModels[0] || "");
-        return applyImageProviderDefaults({
+        return {
             id: p.id || p["节点ID"] || "",
             api_type: p.api_type || p["接口模式"] || "openai_image",
             base_url: p.base_url || p["接口地址 (需含/v1)"] || "",
@@ -1454,7 +1454,7 @@ async function init() {
             available_models: availableModels,
             timeout: p.timeout || p["超时时间(秒)"] || 60,
             api_keys: normalizeTextAreaKeys(p.api_keys || p["API密钥"] || "")
-        });
+        };
     });
 
     state.video_providers = (rawConfig.video_providers || []).map((p) => {

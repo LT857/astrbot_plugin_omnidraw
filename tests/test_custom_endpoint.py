@@ -219,6 +219,22 @@ class CustomEndpointHelpersTest(unittest.TestCase):
             "data:image/webp;base64," + final,
         )
 
+    def test_rejects_non_image_or_invalid_gemini_inline_data(self):
+        endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent"
+        text_inline = {
+            "candidates": [
+                {"content": {"parts": [{"inlineData": {"mimeType": "text/plain", "data": _long_b64()}}]}}
+            ]
+        }
+        invalid_image_inline = {
+            "candidates": [
+                {"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": "not base64!"}}]}}
+            ]
+        }
+
+        self.assertEqual(extract_image_url_from_response(text_inline, endpoint), "")
+        self.assertEqual(extract_image_url_from_response(invalid_image_inline, endpoint), "")
+
     def test_complete_endpoint_validation_rejects_roots(self):
         self.assertTrue(is_complete_endpoint_url("https://api.example.com/v1/images/generations"))
         self.assertTrue(is_complete_endpoint_url("https://ark.cn-beijing.volces.com/api/v3/images/generations"))
@@ -417,6 +433,12 @@ class RuntimeConfigKeyTest(unittest.TestCase):
         app_js = (PLUGIN_DIR / "pages" / "插件配置" / "app.js").read_text(encoding="utf-8")
         self.assertLess(app_js.index('"gemini_official"'), app_js.index('"custom_endpoint"'))
         self.assertIn("GEMINI_OFFICIAL_BASE_URL", app_js)
+        self.assertNotIn("return applyImageProviderDefaults({", app_js)
+
+    def test_tests_directory_is_not_gitignored(self):
+        gitignore = (PLUGIN_DIR / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertNotIn("tests/", gitignore.splitlines())
 
     def test_provider_factory_creates_gemini_provider(self):
         config = ProviderConfig(
@@ -679,6 +701,14 @@ class GeminiOfficialProviderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["generationConfig"]["imageConfig"]["aspectRatio"], "1:1")
         self.assertNotIn("size", payload)
 
+    async def test_size_mapping_supports_wide_official_aspect_ratios(self):
+        provider, session = self._provider(self._gemini_response())
+
+        await provider.generate_image("wide scene", size="2560x1080")
+
+        payload = session.posts[0]["json"]
+        self.assertEqual(payload["generationConfig"]["imageConfig"]["aspectRatio"], "21:9")
+
     async def test_reference_image_uses_official_inline_data_part(self):
         provider, session = self._provider(self._gemini_response())
         reference = "data:image/jpeg;base64," + _long_b64()
@@ -687,8 +717,8 @@ class GeminiOfficialProviderTest(unittest.IsolatedAsyncioTestCase):
 
         parts = session.posts[0]["json"]["contents"][0]["parts"]
         self.assertEqual(parts[0]["text"], "edit a cat")
-        self.assertEqual(parts[1]["inline_data"]["mime_type"], "image/jpeg")
-        self.assertEqual(parts[1]["inline_data"]["data"], _long_b64())
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/jpeg")
+        self.assertEqual(parts[1]["inlineData"]["data"], _long_b64())
 
     async def test_preserves_full_generate_content_endpoint(self):
         endpoint = "https://generativelanguage.googleapis.com/v1beta/models/custom-image:generateContent"

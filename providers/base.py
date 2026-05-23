@@ -366,7 +366,14 @@ def extract_image_url_from_response(payload: Any, base_url: str) -> str:
         if not data:
             return ""
         mime_type = str(value.get("mimeType") or value.get("mime_type") or "image/png").strip() or "image/png"
-        return f"data:{mime_type};base64," + re.sub(r"\s+", "", data)
+        if not mime_type.split(";", 1)[0].lower().startswith("image/"):
+            return ""
+        compact_data = re.sub(r"\s+", "", data)
+        try:
+            base64.b64decode(compact_data, validate=True)
+        except Exception:
+            return ""
+        return f"data:{mime_type};base64,{compact_data}"
 
     def from_gemini_candidates(value: Any) -> str:
         if not isinstance(value, dict):

@@ -25,7 +25,22 @@ from .base import (
 
 
 MAX_REFERENCE_IMAGES = 14
-ALLOWED_ASPECT_RATIOS = ("1:1", "3:4", "4:3", "9:16", "16:9")
+ALLOWED_ASPECT_RATIOS = (
+    "1:1",
+    "3:4",
+    "4:3",
+    "9:16",
+    "16:9",
+    "2:3",
+    "3:2",
+    "4:5",
+    "5:4",
+    "21:9",
+    "1:4",
+    "4:1",
+    "1:8",
+    "8:1",
+)
 
 
 class GeminiOfficialProvider(BaseProvider):
@@ -52,8 +67,8 @@ class GeminiOfficialProvider(BaseProvider):
     async def _inline_image_part(self, image_path_or_url: str) -> Dict[str, Any]:
         image_bytes = await self._get_image_bytes(image_path_or_url)
         return {
-            "inline_data": {
-                "mime_type": guess_image_content_type(image_path_or_url),
+            "inlineData": {
+                "mimeType": guess_image_content_type(image_path_or_url),
                 "data": base64.b64encode(image_bytes).decode("ascii"),
             }
         }
