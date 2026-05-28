@@ -1065,11 +1065,25 @@ class OmniDrawPlugin(Star):
             return ""
         return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
 
-    def _get_event_images(self, event: AstrMessageEvent, include_at_avatars: bool = False) -> List[str]:
+    def _message_component_has_command(self, obj: Any, command: str) -> bool:
+        if not command or type(obj).__name__ != "Plain":
+            return False
+        text = str(getattr(obj, "text", "") or "")
+        pattern = rf"(^|\s)[/!！.]?{re.escape(command)}(?:\s|$)"
+        return bool(re.search(pattern, text))
+
+    def _get_event_images(
+        self,
+        event: AstrMessageEvent,
+        include_at_avatars: bool = False,
+        at_after_command: str = "",
+    ) -> List[str]:
         images = []
         visited = set()
+        allow_at_avatar = not bool(at_after_command)
 
         def _search(obj: Any) -> None:
+            nonlocal allow_at_avatar
             if obj is None or id(obj) in visited:
                 return
             visited.add(id(obj))
@@ -1083,13 +1097,15 @@ class OmniDrawPlugin(Star):
                     images.append(str(ref))
                 return
 
-            if include_at_avatars and (obj_type == "At" or isinstance(obj, At)):
+            if include_at_avatars and allow_at_avatar and (obj_type == "At" or isinstance(obj, At)):
                 avatar_url = self._build_qq_avatar_url(self._extract_at_user_id(obj))
                 if avatar_url:
                     images.append(avatar_url)
                 return
 
             if obj_type == "Plain":
+                if self._message_component_has_command(obj, at_after_command):
+                    allow_at_avatar = True
                 text = getattr(obj, "text", "")
                 if text and str(text).startswith("data:image"):
                     images.append(str(text))
@@ -1922,7 +1938,7 @@ class OmniDrawPlugin(Star):
         try:
             started_at = time.perf_counter()
             async with aiohttp.ClientSession() as session:
-                raw_refs = self._get_event_images(event, include_at_avatars=True)
+                raw_refs = self._get_event_images(event, include_at_avatars=True, at_after_command=cmd_name)
                 preset_prompt = self.plugin_config.presets[cmd_name]
                 safe_refs = await self._process_and_save_images(raw_refs, session=session)
 
@@ -1975,7 +1991,7 @@ class OmniDrawPlugin(Star):
 
         fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10] if item).strip()
         message = self._extract_command_message(event, "画", fallback)
-        raw_refs = self._get_event_images(event, include_at_avatars=True)
+        raw_refs = self._get_event_images(event, include_at_avatars=True, at_after_command="画")
         if not message and not raw_refs:
             yield event.plain_result(f"{MessageEmoji.WARNING} 请输入提示词或附带参考图。")
             return
