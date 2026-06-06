@@ -1636,15 +1636,109 @@ class OmniDrawPlugin(Star):
     def _format_pending_message(self, template: str, default: str, **values: Any) -> str:
         return self._format_reply_message(template, default, **values)
 
-    def _build_fast_preset_list_message(self) -> str:
+    def _preset_items(self) -> List[tuple]:
         presets = getattr(self.plugin_config, "presets", {}) or {}
-        preset_names = [str(name).strip() for name in presets.keys() if str(name).strip()]
+        return [
+            (str(name).strip(), str(prompt or "").strip())
+            for name, prompt in presets.items()
+            if str(name).strip()
+        ]
+
+    def _normalize_preset_selector(self, selector: str) -> str:
+        selector = str(selector or "").strip()
+        if len(selector) >= 2:
+            bracket_pairs = {"[": "]", "【": "】", "「": "」", "《": "》"}
+            closing = bracket_pairs.get(selector[0])
+            if closing and selector.endswith(closing):
+                return selector[1:-1].strip()
+        return selector
+
+    def _find_preset_name(self, selector: str) -> str:
+        selector = self._normalize_preset_selector(selector)
+        if not selector:
+            return ""
+        if selector in (getattr(self.plugin_config, "presets", {}) or {}):
+            return selector
+
+        selector_lower = selector.lower()
+        for name, _ in self._preset_items():
+            if name.lower() == selector_lower:
+                return name
+        return ""
+
+    def _build_preset_list_message(self) -> str:
+        preset_names = [name for name, _ in self._preset_items()]
         if not preset_names:
             return f"{MessageEmoji.INFO} 当前没有配置极速宏预设。"
 
-        lines = ["✨ 极速宏预设列表"]
+        lines = ["✨ 预设列表"]
         lines.extend(f"{index}. {name}" for index, name in enumerate(preset_names, start=1))
         return "\n".join(lines)
+
+    def _build_preset_detail_message(self, selector: str) -> str:
+        preset_name = self._find_preset_name(selector)
+        if not preset_name:
+            return f"{MessageEmoji.WARNING} 找不到预设: {selector}\n可发送 /查看预设 查看所有预设名。"
+
+        preset_prompt = (getattr(self.plugin_config, "presets", {}) or {}).get(preset_name, "")
+        return f"✨ 预设详情\n名称：{preset_name}\n提示词：{preset_prompt}"
+
+    def _build_preset_view_message(self, selector: str = "") -> str:
+        selector = str(selector or "").strip()
+        if selector:
+            return self._build_preset_detail_message(selector)
+        return self._build_preset_list_message()
+
+    def _build_fast_preset_list_message(self) -> str:
+        return self._build_preset_list_message()
+
+    def _extract_compact_command_payload(self, text: str, command: str) -> str:
+        pattern = rf"^\s*[/!！.]{re.escape(command)}(?P<payload>\S.*)$"
+        match = re.match(pattern, str(text or ""), flags=re.S)
+        return (match.group("payload") or "").strip() if match else ""
+
+    def _parse_preset_add_payload(self, payload: str) -> tuple:
+        payload = str(payload or "").strip()
+        if not payload:
+            return "", ""
+        parts = payload.split(maxsplit=1)
+        if len(parts) < 2:
+            return parts[0].strip(), ""
+        return parts[0].strip(), parts[1].strip()
+
+    def _validate_preset_name(self, preset_name: str) -> str:
+        preset_name = str(preset_name or "").strip()
+        if not preset_name:
+            return "缺少预设名。"
+        if any(char in preset_name for char in (":", "\r", "\n", "\t")):
+            return "预设名不能包含冒号、换行或制表符。"
+        if preset_name.startswith(("/", "!", "！", ".")):
+            return "预设名不需要包含指令前缀。"
+        return ""
+
+    def _replace_presets(self, presets: Dict[str, str]) -> None:
+        normalized = [f"{name}:{prompt}" for name, prompt in presets.items()]
+        with self._config_lock:
+            self.raw_config["presets"] = normalized
+            self._apply_runtime_config(self.raw_config)
+            self._persist_config()
+            self._safe_update_context_config()
+
+    def _upsert_preset(self, preset_name: str, preset_prompt: str) -> bool:
+        presets = dict(self._preset_items())
+        existed = preset_name in presets
+        presets[preset_name] = preset_prompt
+        self._replace_presets(presets)
+        return existed
+
+    def _delete_preset(self, selector: str) -> str:
+        preset_name = self._find_preset_name(selector)
+        if not preset_name:
+            return ""
+        presets = dict(self._preset_items())
+        presets.pop(preset_name, None)
+        self._replace_presets(presets)
+        return preset_name
 
     def _build_command_error_message(self, func_name: str, exc: Exception, error_kind: str = "exception") -> Optional[str]:
         func_name = str(func_name or "")
@@ -1708,17 +1802,90 @@ class OmniDrawPlugin(Star):
             "/切换模型 [画图/自拍/视频] [序号或名称]\n"
             "/签到\n"
             "/清理缓存\n"
-            "/极速宏\n"
+            "/查看预设 [预设名]\n"
+            "/添加预设 [预设名] [提示词]\n"
+            "/删除预设 [预设名]\n"
             "/万象帮助\n\n"
         )
         if self.plugin_config.presets:
-            msg += "✨ 极速宏:\n" + "\n".join([f"/{preset}" for preset in self.plugin_config.presets.keys()])
+            msg += "✨ 预设:\n" + "\n".join([f"/{preset}" for preset in self.plugin_config.presets.keys()])
         yield event.plain_result(msg)
+
+    @filter.command("查看预设")
+    @handle_errors
+    async def cmd_view_presets(
+        self,
+        event: AstrMessageEvent,
+        p1: str = "",
+        p2: str = "",
+        p3: str = "",
+        p4: str = "",
+        p5: str = "",
+    ) -> AsyncGenerator[Any, None]:
+        fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5] if item).strip()
+        selector = self._extract_command_message(event, "查看预设", fallback)
+        yield event.plain_result(self._build_preset_view_message(selector))
 
     @filter.command("极速宏")
     @handle_errors
     async def cmd_fast_preset_list(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
         yield event.plain_result(self._build_fast_preset_list_message())
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("添加预设")
+    @handle_errors
+    async def cmd_add_preset(
+        self,
+        event: AstrMessageEvent,
+        p1: str = "",
+        p2: str = "",
+        p3: str = "",
+        p4: str = "",
+        p5: str = "",
+        p6: str = "",
+        p7: str = "",
+        p8: str = "",
+        p9: str = "",
+        p10: str = "",
+    ) -> AsyncGenerator[Any, None]:
+        fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10] if item).strip()
+        payload = self._extract_command_message(event, "添加预设", fallback)
+        preset_name, preset_prompt = self._parse_preset_add_payload(payload)
+        name_error = self._validate_preset_name(preset_name)
+        if name_error:
+            yield event.plain_result(f"{MessageEmoji.WARNING} {name_error}\n用法: /添加预设 [预设名] [提示词]")
+            return
+        if not preset_prompt:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 缺少提示词。\n用法: /添加预设 [预设名] [提示词]")
+            return
+
+        existed = self._upsert_preset(preset_name, preset_prompt)
+        action = "已更新" if existed else "已添加"
+        yield event.plain_result(f"{MessageEmoji.SUCCESS} {action}预设「{preset_name}」。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("删除预设")
+    @handle_errors
+    async def cmd_delete_preset(
+        self,
+        event: AstrMessageEvent,
+        p1: str = "",
+        p2: str = "",
+        p3: str = "",
+        p4: str = "",
+        p5: str = "",
+    ) -> AsyncGenerator[Any, None]:
+        fallback = " ".join(str(item) for item in [p1, p2, p3, p4, p5] if item).strip()
+        selector = self._extract_command_message(event, "删除预设", fallback)
+        if not selector:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 缺少预设名。\n用法: /删除预设 [预设名]")
+            return
+
+        deleted_name = self._delete_preset(selector)
+        if not deleted_name:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 找不到预设: {selector}\n可发送 /查看预设 查看所有预设名。")
+            return
+        yield event.plain_result(f"{MessageEmoji.SUCCESS} 已删除预设「{deleted_name}」。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("清理缓存")
@@ -1933,9 +2100,15 @@ class OmniDrawPlugin(Star):
 
     @filter.event_message_type(EventMessageType.ALL)
     async def on_message_preset(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
+        text = self._get_event_text(event)
+
+        compact_view_selector = self._extract_compact_command_payload(text, "查看预设")
+        if compact_view_selector:
+            yield event.plain_result(self._build_preset_view_message(compact_view_selector))
+            return
+
         if not self.plugin_config.presets:
             return
-        text = self._get_event_text(event)
         match = re.match(r"^\s*[/!！.]([^\s]+)", text)
         if not match:
             return

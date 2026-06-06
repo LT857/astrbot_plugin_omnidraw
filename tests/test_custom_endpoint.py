@@ -538,17 +538,63 @@ class FastPresetListTest(unittest.TestCase):
 
         message = plugin._build_fast_preset_list_message()
 
-        self.assertIn("✨ 极速宏预设列表", message)
+        self.assertIn("✨ 预设列表", message)
         self.assertIn("1. 胶片少女", message)
         self.assertIn("2. 机甲猫", message)
         self.assertNotIn("35mm film portrait", message)
         self.assertNotIn("cinematic lighting", message)
         self.assertNotIn("detailed private prompt", message)
 
+    def test_view_preset_detail_contains_only_selected_prompt(self):
+        plugin = self._plugin(
+            {
+                "胶片少女": "35mm film portrait, golden hour",
+                "机甲猫": "mecha cat, cinematic lighting",
+            }
+        )
+
+        message = plugin._build_preset_view_message("胶片少女")
+
+        self.assertIn("名称：胶片少女", message)
+        self.assertIn("提示词：35mm film portrait, golden hour", message)
+        self.assertNotIn("mecha cat", message)
+
+    def test_view_preset_detail_accepts_compact_and_bracket_selector(self):
+        plugin = self._plugin({"胶片少女": "35mm film portrait"})
+
+        self.assertEqual(plugin._extract_compact_command_payload("/查看预设胶片少女", "查看预设"), "胶片少女")
+        self.assertEqual(plugin._extract_compact_command_payload("/查看预设 胶片少女", "查看预设"), "")
+        message = plugin._build_preset_view_message("[胶片少女]")
+
+        self.assertIn("名称：胶片少女", message)
+        self.assertIn("提示词：35mm film portrait", message)
+
     def test_fast_preset_list_handles_empty_presets(self):
         message = self._plugin({})._build_fast_preset_list_message()
 
         self.assertIn("当前没有配置极速宏预设", message)
+
+    def test_preset_add_payload_requires_name_and_prompt(self):
+        plugin = self._plugin({})
+
+        self.assertEqual(plugin._parse_preset_add_payload("胶片少女 35mm film portrait"), ("胶片少女", "35mm film portrait"))
+        self.assertEqual(plugin._parse_preset_add_payload("胶片少女"), ("胶片少女", ""))
+        self.assertIn("不能包含冒号", plugin._validate_preset_name("坏:名字"))
+
+    def test_upsert_and_delete_preset_update_runtime_presets(self):
+        plugin = self._plugin({"旧预设": "old prompt"})
+
+        def replace_presets(presets):
+            plugin.plugin_config = types.SimpleNamespace(presets=dict(presets))
+
+        plugin._replace_presets = replace_presets
+
+        self.assertFalse(plugin._upsert_preset("新预设", "new prompt"))
+        self.assertEqual(plugin.plugin_config.presets["新预设"], "new prompt")
+        self.assertTrue(plugin._upsert_preset("新预设", "updated prompt"))
+        self.assertEqual(plugin.plugin_config.presets["新预设"], "updated prompt")
+        self.assertEqual(plugin._delete_preset("新预设"), "新预设")
+        self.assertNotIn("新预设", plugin.plugin_config.presets)
 
 
 class ChainManagerMetadataTest(unittest.IsolatedAsyncioTestCase):
