@@ -1636,6 +1636,16 @@ class OmniDrawPlugin(Star):
     def _format_pending_message(self, template: str, default: str, **values: Any) -> str:
         return self._format_reply_message(template, default, **values)
 
+    def _build_fast_preset_list_message(self) -> str:
+        presets = getattr(self.plugin_config, "presets", {}) or {}
+        preset_names = [str(name).strip() for name in presets.keys() if str(name).strip()]
+        if not preset_names:
+            return f"{MessageEmoji.INFO} 当前没有配置极速宏预设。"
+
+        lines = ["✨ 极速宏预设列表"]
+        lines.extend(f"{index}. {name}" for index, name in enumerate(preset_names, start=1))
+        return "\n".join(lines)
+
     def _build_command_error_message(self, func_name: str, exc: Exception, error_kind: str = "exception") -> Optional[str]:
         func_name = str(func_name or "")
         error_text = str(exc or "").strip() or (
@@ -1698,11 +1708,17 @@ class OmniDrawPlugin(Star):
             "/切换模型 [画图/自拍/视频] [序号或名称]\n"
             "/签到\n"
             "/清理缓存\n"
+            "/极速宏\n"
             "/万象帮助\n\n"
         )
         if self.plugin_config.presets:
             msg += "✨ 极速宏:\n" + "\n".join([f"/{preset}" for preset in self.plugin_config.presets.keys()])
         yield event.plain_result(msg)
+
+    @filter.command("极速宏")
+    @handle_errors
+    async def cmd_fast_preset_list(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
+        yield event.plain_result(self._build_fast_preset_list_message())
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("清理缓存")

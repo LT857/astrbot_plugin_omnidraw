@@ -16,6 +16,7 @@ sys.path.insert(0, str(PACKAGE_PARENT))
 astrbot_module = types.ModuleType("astrbot")
 astrbot_api_module = types.ModuleType("astrbot.api")
 astrbot_event_module = types.ModuleType("astrbot.api.event")
+astrbot_event_components_module = types.ModuleType("astrbot.api.event.components")
 astrbot_message_components_module = types.ModuleType("astrbot.api.message_components")
 astrbot_star_module = types.ModuleType("astrbot.api.star")
 quart_module = types.ModuleType("quart")
@@ -43,6 +44,11 @@ astrbot_event_module.AstrMessageEvent = object
 class _Plain:
     def __init__(self, text=""):
         self.text = text
+
+
+class _At:
+    def __init__(self, qq=""):
+        self.qq = qq
 
 
 class _Video:
@@ -94,7 +100,11 @@ async def _send_file(*args, **kwargs):
 
 astrbot_message_components_module.Plain = _Plain
 astrbot_message_components_module.Image = _Image
+astrbot_message_components_module.At = _At
 astrbot_message_components_module.Video = _Video
+astrbot_event_components_module.Plain = _Plain
+astrbot_event_components_module.Image = _Image
+astrbot_event_components_module.At = _At
 astrbot_event_module.filter = _Filter()
 astrbot_event_module.EventMessageType = types.SimpleNamespace(ALL="all")
 astrbot_api_module.llm_tool = _identity_decorator
@@ -107,6 +117,7 @@ quart_module.send_file = _send_file
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules.setdefault("astrbot.api", astrbot_api_module)
 sys.modules.setdefault("astrbot.api.event", astrbot_event_module)
+sys.modules.setdefault("astrbot.api.event.components", astrbot_event_components_module)
 sys.modules.setdefault("astrbot.api.message_components", astrbot_message_components_module)
 sys.modules.setdefault("astrbot.api.star", astrbot_star_module)
 sys.modules.setdefault("quart", quart_module)
@@ -509,6 +520,35 @@ class ImageSuccessComponentsTest(unittest.TestCase):
         self.assertNotIn("生图耗时", model_only[0].text)
         self.assertIn("请求模型：actual-model", model_only[0].text)
         self.assertEqual(hidden, [{"type": "image", "url": "https://cdn.example.com/out.png"}])
+
+
+class FastPresetListTest(unittest.TestCase):
+    def _plugin(self, presets):
+        plugin = object.__new__(OmniDrawPlugin)
+        plugin.plugin_config = types.SimpleNamespace(presets=presets)
+        return plugin
+
+    def test_fast_preset_list_only_contains_preset_names(self):
+        plugin = self._plugin(
+            {
+                "胶片少女": "35mm film portrait, golden hour, detailed private prompt",
+                "机甲猫": "mecha cat, cinematic lighting, detailed private prompt",
+            }
+        )
+
+        message = plugin._build_fast_preset_list_message()
+
+        self.assertIn("✨ 极速宏预设列表", message)
+        self.assertIn("1. 胶片少女", message)
+        self.assertIn("2. 机甲猫", message)
+        self.assertNotIn("35mm film portrait", message)
+        self.assertNotIn("cinematic lighting", message)
+        self.assertNotIn("detailed private prompt", message)
+
+    def test_fast_preset_list_handles_empty_presets(self):
+        message = self._plugin({})._build_fast_preset_list_message()
+
+        self.assertIn("当前没有配置极速宏预设", message)
 
 
 class ChainManagerMetadataTest(unittest.IsolatedAsyncioTestCase):
