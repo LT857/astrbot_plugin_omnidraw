@@ -204,6 +204,28 @@
             "hint": "可切换模型列表。每行一个模型名，例如 gpt-image-1。",
             "default": []
           },
+          "image_resolution_mode": {
+            "description": "尺寸格式模式",
+            "type": "string",
+            "options": [
+              "official",
+              "custom"
+            ],
+            "hint": "official=官方比例+K档位，例如 9:16 4K、1:1 2K、4K 9:16；custom=自定义像素分辨率，例如 1024x1536、2048x2048。配置文件优先，会覆盖命令/工具传入的同类参数。",
+            "default": "official"
+          },
+          "image_size": {
+            "description": "默认图片尺寸",
+            "type": "string",
+            "hint": "official 模式填写 9:16 4K、16:9 2K、1:1 4K、2Kx2K；custom 模式填写 1024x1536、1536x1024、2048x2048。配置文件优先，会覆盖命令/工具里的 size。",
+            "default": ""
+          },
+          "aspect_ratio": {
+            "description": "默认宽高比",
+            "type": "string",
+            "hint": "可选。单独指定比例时会覆盖 image_size 中的比例，例如 9:16、16:9、1:1。Gemini 官方会直接使用；OpenAI 官方会转成官方允许的 size。",
+            "default": ""
+          },
           "timeout": {
             "description": "请求超时（秒）",
             "type": "float",
@@ -285,6 +307,33 @@
         "hint": "填写 profiles 中某个人设的 id，例如 default 或 persona_2。",
         "default": "default"
       },
+      "active_time_period": {
+        "description": "当前生效时段",
+        "type": "string",
+        "hint": "决定 /自拍 使用哪个时段的参考图。可在 Pages 中分别上传早上/白天/晚上的专用参考图。",
+        "default": "day",
+        "options": [
+          "morning",
+          "day",
+          "evening"
+        ]
+      },
+      "time_period_hours": {
+        "description": "时段范围（小时）",
+        "type": "object",
+        "hint": "定义早上/白天/晚上的起止小时（0-23）。默认: 早上6-9, 白天9-18, 晚上18-6。",
+        "default": {
+          "morning": { "start": 6, "end": 9 },
+          "day": { "start": 9, "end": 18 },
+          "evening": { "start": 18, "end": 6 }
+        },
+        "invisible": true,
+        "items": {
+          "morning": { "type": "object", "items": {}, "invisible": true },
+          "day": { "type": "object", "items": {}, "invisible": true },
+          "evening": { "type": "object", "items": {}, "invisible": true }
+        }
+      },
       "profiles": {
         "description": "人设列表",
         "type": "template_list",
@@ -323,8 +372,20 @@
               "persona_ref_image": {
                 "description": "人设参考图组",
                 "type": "list",
-                "hint": "每行一个图片地址。支持 Pages 保存的本地路径、图片 URL、data:image，或下方“当前激活人设参考图上传入口”上传后生成的 files/... 路径。注意：AstrBot 原生配置页暂不支持在多条目模板内部直接上传文件。",
+                "hint": "每行一个图片地址。支持 Pages 保存的本地路径、图片 URL、data:image，或下方「当前激活人设参考图上传入口」上传后生成的 files/... 路径。注意：AstrBot 原生配置页暂不支持在多条目模板内部直接上传文件。",
                 "default": []
+              },
+              "time_period_refs": {
+                "description": "时段专用参考图（由 Pages 管理）",
+                "type": "object",
+                "hint": "早上/白天/晚上各一组参考图。请在 Pages / 插件配置中上传管理，此处为只读展示。",
+                "default": { "morning": [], "day": [], "evening": [] },
+                "invisible": true,
+                "items": {
+                  "morning": { "type": "list", "default": [], "invisible": true },
+                  "day": { "type": "list", "default": [], "invisible": true },
+                  "evening": { "type": "list", "default": [], "invisible": true }
+                }
               }
             }
           }
@@ -347,9 +408,28 @@
       "persona_ref_image": {
         "description": "当前激活人设参考图上传入口",
         "type": "file",
-        "hint": "这里用于 AstrBot 原生配置页上传图片。上传并保存后，插件会把文件同步到 active_persona_id 对应的人设参考图组；多个人设的参考图也可在上方人设列表中填写 paths/URL，或到 Pages / 插件配置中管理。",
+        "hint": "这里只显示/管理 AstrBot 原生配置页上传的文件。Pages 中上传的时段参考图不会回填到这里，以免原生配置页加载变慢；请在 Pages 的“参考图”只读页查看当前生效参考图。",
         "default": [],
         "file_types": ["png", "jpg", "jpeg", "webp", "gif"]
+      },
+      "effective_ref_status": {
+        "description": "当前生效参考图状态（只读）",
+        "type": "string",
+        "hint": "由插件自动统计当前 active_persona_id 与当前生效时段实际会用于 /自拍 的参考图数量，不会加载图片文件。",
+        "default": "0 张"
+      },
+      "effective_ref_source": {
+        "description": "当前参考图来源（只读）",
+        "type": "string",
+        "hint": "显示当前生效参考图来自时段专用图、共享兜底图，还是暂无参考图。",
+        "default": "暂无参考图"
+      },
+      "persona_time_period_refs": {
+        "description": "当前时段生效参考图（运行态兼容字段）",
+        "type": "list",
+        "hint": "由插件自动维护，用于兼容旧逻辑；请在 Pages / 插件配置的人设页面管理参考图。",
+        "default": [],
+        "invisible": true
       }
     }
   },
@@ -419,6 +499,12 @@
     "type": "bool",
     "hint": "排查接口耗时、发送耗时、链路问题时可开启；日常使用建议关闭。",
     "default": false
+  },
+  "hide_preset_prompt": {
+    "description": "隐藏宏指令提示词",
+    "type": "bool",
+    "hint": "开启后，宏指令/预设开始绘制前的详细汇报不会显示完整底层提示词；自定义等待文案里的 {prompt} 也会显示为“已隐藏”。",
+    "default": true
   },
   "show_generation_time": {
     "description": "成功后显示生成耗时",

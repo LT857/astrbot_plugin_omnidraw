@@ -95,6 +95,7 @@ class OpenAIChatProvider(BaseProvider):
         # 🚀 将高级透传参数暴力注入到 Chat 协议的顶级结构中
         internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
         api_kwargs = {k: v for k, v in kwargs.items() if k not in internal_keys}
+        self.apply_configured_image_defaults(api_kwargs)
         
         if api_kwargs:
             payload.update(api_kwargs)

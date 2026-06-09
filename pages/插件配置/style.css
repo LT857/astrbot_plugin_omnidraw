@@ -945,6 +945,96 @@ select.input-modern {
     animation: route-toggle-pop 520ms cubic-bezier(0.17, 1.42, 0.28, 1);
 }
 
+/* 时段参考图 tabs */
+.period-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.period-tab {
+    flex: 1;
+    min-width: 90px;
+    padding: 10px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.48);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.38);
+    color: var(--text-muted, #888);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+    transition: all 220ms ease;
+    user-select: none;
+}
+
+.period-tab:hover {
+    background: rgba(255, 255, 255, 0.62);
+    border-color: rgba(255, 255, 255, 0.72);
+    color: var(--text-primary, #333);
+}
+
+.period-tab.active {
+    background: rgba(255, 255, 255, 0.82);
+    border-color: #60a5fa;
+    color: #2563eb;
+    box-shadow: 0 2px 8px rgba(96, 165, 250, 0.25);
+    font-weight: 700;
+}
+
+.period-tab.is-current {
+    border-color: #34d399;
+}
+
+.period-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    margin-left: 4px;
+    border-radius: 50%;
+    background: #34d399;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.period-hours-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding: 10px 14px;
+    background: rgba(255, 255, 255, 0.28);
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--text-muted, #666);
+}
+
+.period-hours-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+}
+
+.period-hour-input {
+    width: 56px;
+    text-align: center;
+    padding: 6px 4px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.period-hour-sep {
+    font-size: 16px;
+    font-weight: 300;
+    color: var(--text-muted, #999);
+}
+
 .route-control.route-bounce .route-backup-selector {
     animation: backup-shelf-pop 520ms cubic-bezier(0.17, 1.42, 0.28, 1);
 }
@@ -1286,6 +1376,112 @@ select.input-modern {
     object-fit: contain;
 }
 
+.image-preview.is-loading,
+.image-preview.is-missing {
+    min-height: 88px;
+    cursor: pointer;
+    background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.38)),
+        rgba(238, 241, 246, 0.82);
+    background-size: 220% 100%;
+    animation: preview-loading 1.3s ease-in-out infinite;
+}
+
+.image-preview.is-missing {
+    animation: none;
+    cursor: default;
+    opacity: 0.56;
+}
+
+.readonly-ref-card {
+    min-height: 560px;
+}
+
+.readonly-pill {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 6px 12px;
+    border: 1px solid rgba(22, 163, 74, 0.26);
+    border-radius: 999px;
+    color: #15803d;
+    background: rgba(220, 252, 231, 0.7);
+    font-size: 12px;
+    font-weight: 850;
+}
+
+.current-ref-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(120px, 1fr));
+    gap: 12px;
+    margin: 18px 0 12px;
+}
+
+.current-ref-summary > div {
+    padding: 14px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.58);
+    border-radius: var(--radius-sm);
+    background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(245, 248, 252, 0.58));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.current-ref-summary small {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 780;
+}
+
+.current-ref-summary strong {
+    color: var(--text-main);
+    font-size: clamp(18px, 2vw, 24px);
+    font-weight: 900;
+}
+
+.readonly-note {
+    margin: 8px 0 18px;
+    padding: 12px 14px;
+    border: 1px solid rgba(37, 99, 235, 0.14);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    background: rgba(239, 246, 255, 0.72);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.current-ref-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-start;
+}
+
+.readonly-ref-item {
+    cursor: default;
+}
+
+.readonly-ref-index {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    z-index: 2;
+    padding: 5px 8px;
+    border-radius: 999px;
+    color: #fff;
+    background: rgba(15, 23, 42, 0.62);
+    backdrop-filter: blur(10px);
+    font-size: 11px;
+    font-weight: 850;
+    line-height: 1;
+}
+
+.readonly-empty {
+    width: 100%;
+    min-height: 180px;
+}
+
 .btn-del-img {
     position: absolute;
     top: 5px;
@@ -1304,6 +1500,16 @@ select.input-modern {
     font-size: 13px;
     line-height: 1;
     transition: background var(--ease), transform var(--spring-fast);
+}
+
+@keyframes preview-loading {
+    from {
+        background-position: 120% 0;
+    }
+
+    to {
+        background-position: -120% 0;
+    }
 }
 
 .btn-del-img:hover {
@@ -1328,9 +1534,9 @@ select.input-modern {
 
 .list-item {
     display: grid;
-    grid-template-columns: minmax(120px, 0.28fr) auto minmax(180px, 1fr) auto;
+    grid-template-columns: minmax(120px, 0.25fr) auto minmax(160px, 1fr) auto auto;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
     padding: 14px 16px;
     border-radius: var(--radius-md);
     transition:
@@ -1350,6 +1556,21 @@ select.input-modern {
 .preset-arrow {
     color: var(--text-soft);
     font-weight: 900;
+}
+
+.preset-hidden-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-soft);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.preset-hidden-label input[type="checkbox"] {
+    accent-color: var(--primary);
 }
 
 .node-card {
@@ -1671,6 +1892,10 @@ select.input-modern {
         gap: 16px;
     }
 
+    .current-ref-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .card,
     .node-card {
         padding: 24px;
@@ -1716,6 +1941,10 @@ select.input-modern {
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 8px;
         overflow: visible;
+    }
+
+    .current-ref-summary {
+        grid-template-columns: 1fr;
     }
 
     .nav-item {

@@ -34,6 +34,9 @@
                 <button class="nav-item" data-target="tab-persona" type="button">
                     <span class="nav-icon">◎</span><span>人设</span>
                 </button>
+                <button class="nav-item" data-target="tab-current-refs" type="button">
+                    <span class="nav-icon">◉</span><span>参考图</span>
+                </button>
                 <button class="nav-item" data-target="tab-hub" type="button">
                     <span class="nav-icon">↔</span><span>调度</span>
                 </button>
@@ -105,10 +108,19 @@
                         <div class="setting-row">
                             <div>
                                 <h3>详细汇报模式</h3>
-                                <p>绘制前展示提示词、参数量和参考图数量。</p>
+                                <p>绘制前展示参数量和参考图数量。</p>
                             </div>
                             <label class="switch-wrapper" for="verbose_report">
                                 <input type="checkbox" id="verbose_report" class="ios-switch" />
+                            </label>
+                        </div>
+                        <div class="setting-row">
+                            <div>
+                                <h3>隐藏宏指令提示词</h3>
+                                <p>预设绘图时不在等待回复里展示完整底层提示词。</p>
+                            </div>
+                            <label class="switch-wrapper" for="hide_preset_prompt">
+                                <input type="checkbox" id="hide_preset_prompt" class="ios-switch" />
                             </label>
                         </div>
                     </article>
@@ -313,9 +325,19 @@
                     <article class="card">
                         <div class="card-header">
                             <div>
-                                <h3>参考图矩阵</h3>
-                                <p>支持多张形象参考图。最好1-3张，建议控制在5张以内。</p>
+                                <h3>时段参考图</h3>
+                                <p>为早上/白天/晚上设置不同的形象参考图。当前时段: <strong id="persona-period-label">白天</strong></p>
                             </div>
+                        </div>
+                        <div class="period-tabs" id="persona-period-tabs">
+                            <button type="button" class="period-tab" data-period="morning">🌅 早上</button>
+                            <button type="button" class="period-tab" data-period="day">☀️ 白天</button>
+                            <button type="button" class="period-tab" data-period="evening">🌙 晚上</button>
+                        </div>
+                        <div class="period-hours-row" id="persona-period-hours">
+                            <label>开始 <input type="number" class="input-modern period-hour-input" id="period-start" min="0" max="23" value="6" data-period-hour="start" /></label>
+                            <span class="period-hour-sep">~</span>
+                            <label>结束 <input type="number" class="input-modern period-hour-input" id="period-end" min="0" max="23" value="9" data-period-hour="end" /></label>
                         </div>
                         <div class="multi-upload-container" id="persona-upload-container">
                             <button class="upload-trigger" id="persona-upload-trigger" type="button">
@@ -326,6 +348,38 @@
                         <input type="file" id="hidden-file-input" accept="image/png, image/jpeg, image/webp" multiple hidden />
                     </article>
                 </div>
+            </section>
+
+            <section id="tab-current-refs" class="tab-pane" data-title="当前参考图">
+                <article class="card wide-card readonly-ref-card">
+                    <div class="card-header space-between">
+                        <div>
+                            <h3>当前生效参考图</h3>
+                            <p>这里只读展示 /自拍 当前会使用的参考图，不提供配置入口。</p>
+                        </div>
+                        <span class="readonly-pill">只读查看</span>
+                    </div>
+                    <div class="current-ref-summary">
+                        <div>
+                            <small>当前人设</small>
+                            <strong id="current-ref-persona">默认助理</strong>
+                        </div>
+                        <div>
+                            <small>当前时段</small>
+                            <strong id="current-ref-period">白天</strong>
+                        </div>
+                        <div>
+                            <small>参考图来源</small>
+                            <strong id="current-ref-source">时段专用</strong>
+                        </div>
+                        <div>
+                            <small>生效张数</small>
+                            <strong id="current-ref-count">0</strong>
+                        </div>
+                    </div>
+                    <div class="readonly-note" id="current-ref-note">当前页面不会修改配置；如需更换参考图，请到“人设”页面操作。</div>
+                    <div class="current-ref-grid" id="current-ref-container"></div>
+                </article>
             </section>
 
             <section id="tab-hub" class="tab-pane" data-title="生成调度">

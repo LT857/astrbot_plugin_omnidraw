@@ -35,13 +35,7 @@
 
 ### 1. 安装插件
 
-在 AstrBot 插件目录中安装本插件，或通过 AstrBot 插件市场 / GitHub 仓库安装。
-
-仓库地址：
-
-```text
-https://github.com/diaomin66/astrbot_plugin_omnidraw/
-```
+在 AstrBot 插件目录中安装本插件，或通过 AstrBot 插件市场安装。
 
 安装完成后，在 AstrBot 后台重载插件，看到“万象画卷”正常启用即可。
 
@@ -138,6 +132,10 @@ https://github.com/diaomin66/astrbot_plugin_omnidraw/
 - `💥 自拍生成失败: {error}`
 
 留空后会自动恢复内置默认值。你可以在 Pages 的“插件配置”页里直接改，也可以在原生配置里改 `reply_config`。
+
+### 宏指令提示词隐藏
+
+`hide_preset_prompt` 默认开启。开启后，宏指令/预设绘图开始前的等待回复不会展示完整底层提示词；如果你的自定义等待文案里写了 `{prompt}`，也会显示为“已隐藏”。关闭后，详细汇报模式会恢复显示完整宏提示词。
 
 ### 成功结果信息
 
@@ -316,11 +314,5 @@ astrbot_plugin_omnidraw/
 ```
 
 ---
-
-## 鸣谢
-
-- [AstrBot](https://github.com/Soulter/AstrBot)：感谢提供强大、可扩展的机器人插件框架。
-- [astrbot_plugin_shoubanhua](https://github.com/shskjw/astrbot_plugin_shoubanhua)：感谢动态模型热切换思路。
-- [astrbot_plugin_gitee_aiimg](https://github.com/muyouzhi6/astrbot_plugin_gitee_aiimg)：感谢视频接入与异步渲染思路。
 
 也感谢所有测试、反馈和贡献建议的用户。

@@ -4,21 +4,15 @@ import aiohttp
 from ..models import ProviderConfig
 from ..constants import APIType
 from .base import BaseProvider
-from .custom_endpoint_impl import CustomEndpointProvider
-from .gemini_official_impl import GeminiOfficialProvider
-from .openai_impl import OpenAIProvider
-from .openai_chat_impl import OpenAIChatProvider
+from .unified_image_impl import UnifiedImageProvider
 
 def create_provider(config: ProviderConfig, session: aiohttp.ClientSession) -> BaseProvider:
-    """根据配置实例化对应的 Provider"""
-    if config.api_type == APIType.OPENAI_IMAGE:
-        return OpenAIProvider(config, session)
-    # ===== 加入了 openai_chat 的识别分支 =====
-    elif config.api_type == APIType.OPENAI_CHAT:
-        return OpenAIChatProvider(config, session)
-    elif config.api_type == APIType.GEMINI_OFFICIAL:
-        return GeminiOfficialProvider(config, session)
-    elif config.api_type == APIType.CUSTOM_ENDPOINT:
-        return CustomEndpointProvider(config, session)
-    else:
-        raise NotImplementedError(f"暂不支持该类型的接口: {config.api_type}")
+    """根据配置实例化 Provider。所有图片节点统一走同一套请求逻辑。"""
+    if config.api_type in {
+        APIType.OPENAI_IMAGE,
+        APIType.OPENAI_CHAT,
+        APIType.GEMINI_OFFICIAL,
+        APIType.CUSTOM_ENDPOINT,
+    }:
+        return UnifiedImageProvider(config, session)
+    raise NotImplementedError(f"暂不支持该类型的接口: {config.api_type}")

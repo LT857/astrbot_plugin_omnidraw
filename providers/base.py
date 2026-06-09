@@ -2,6 +2,7 @@
 import aiohttp
 import base64
 import json
+import math
 import mimetypes
 import os
 import re
@@ -521,6 +522,132 @@ class BaseProvider(ABC):
 
         seen = set()
         return [ref for ref in refs if not (ref in seen or seen.add(ref))]
+
+    def _configured_image_size(self) -> str:
+        return str(getattr(self.config, "image_size", "") or "").strip()
+
+    def _configured_aspect_ratio(self) -> str:
+        return str(getattr(self.config, "aspect_ratio", "") or "").strip()
+
+    def _configured_resolution_mode(self) -> str:
+        raw = str(getattr(self.config, "image_resolution_mode", "") or "").strip()
+        lowered = raw.lower()
+        if lowered in {"custom", "pixel", "pixels", "resolution"} or "自定义" in raw:
+            return "custom"
+        return "official"
+
+    def _normalize_aspect_ratio_text(self, value: Any) -> str:
+        text = str(value or "").strip().replace("：", ":").replace("／", "/").replace("×", "x")
+        text = re.sub(r"\s+", "", text)
+        if not text:
+            return ""
+        match = re.fullmatch(r"(\d+)([:/])(\d+)", text)
+        if not match:
+            # Treat tiny AxB values like 9x16 as ratios, but keep 1024x1536 as a size.
+            x_match = re.fullmatch(r"(\d+)x(\d+)", text, flags=re.IGNORECASE)
+            if not x_match:
+                return ""
+            width, height = int(x_match.group(1)), int(x_match.group(2))
+            if width > 32 or height > 32:
+                return ""
+        else:
+            width, height = int(match.group(1)), int(match.group(3))
+        if width <= 0 or height <= 0:
+            return ""
+        divisor = math.gcd(width, height)
+        return f"{width // divisor}:{height // divisor}"
+
+    def _format_ratio_from_numbers(self, width: float, height: float) -> str:
+        if width <= 0 or height <= 0:
+            return ""
+        scale = 1000
+        width_int = max(1, int(round(width * scale)))
+        height_int = max(1, int(round(height * scale)))
+        divisor = math.gcd(width_int, height_int)
+        return f"{width_int // divisor}:{height_int // divisor}"
+
+    def _normalize_k_size_text(self, value: Any) -> str:
+        text = str(value or "").strip().upper()
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*K", text)
+        if not match:
+            return ""
+        amount = float(match.group(1))
+        if amount <= 0:
+            return ""
+        number = str(int(amount)) if amount.is_integer() else f"{amount:g}"
+        return f"{number}K"
+
+    def _parse_official_image_format(self, value: Any) -> Dict[str, str]:
+        """Parse official ratio+K formats like '9:16 4K' or '2Kx2K'."""
+        text = str(value or "").strip()
+        if not text:
+            return {}
+        normalized = text.replace("：", ":").replace("／", "/").replace("×", "x").replace("＊", "*")
+        result: Dict[str, str] = {}
+
+        k_pair = re.search(
+            r"(\d+(?:\.\d+)?)\s*[kK]\s*(?:[xX*]|乘|by)?\s*(\d+(?:\.\d+)?)\s*[kK]",
+            normalized,
+        )
+        if k_pair:
+            width_k = float(k_pair.group(1))
+            height_k = float(k_pair.group(2))
+            result["aspect_ratio"] = self._format_ratio_from_numbers(width_k, height_k)
+            result["image_size"] = self._normalize_k_size_text(f"{max(width_k, height_k):g}K")
+            return {k: v for k, v in result.items() if v}
+
+        ratio_match = re.search(r"(?<!\d)(\d{1,2})\s*[:/]\s*(\d{1,2})(?!\d)", normalized)
+        if ratio_match:
+            result["aspect_ratio"] = self._normalize_aspect_ratio_text(f"{ratio_match.group(1)}:{ratio_match.group(2)}")
+        else:
+            small_x_ratio = re.search(r"(?<!\d)(\d{1,2})\s*[xX]\s*(\d{1,2})(?!\d)", normalized)
+            if small_x_ratio:
+                result["aspect_ratio"] = self._normalize_aspect_ratio_text(f"{small_x_ratio.group(1)}x{small_x_ratio.group(2)}")
+
+        k_match = re.search(r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)\s*[kK](?![A-Za-z0-9])", normalized)
+        if k_match:
+            result["image_size"] = self._normalize_k_size_text(f"{k_match.group(1)}K")
+
+        return {k: v for k, v in result.items() if v}
+
+    def apply_configured_image_defaults(
+        self,
+        params: Dict[str, Any],
+        *,
+        size_key: str = "size",
+        aspect_key: str = "aspect_ratio",
+        include_aspect: bool = True,
+    ) -> None:
+        """Apply node-level image options with config-file priority."""
+        mode = self._configured_resolution_mode()
+        configured_size = self._configured_image_size()
+        if configured_size:
+            for key in ("size", "image_size", "imageSize"):
+                params.pop(key, None)
+            official_format = self._parse_official_image_format(configured_size)
+            if mode == "official" and official_format:
+                if include_aspect and official_format.get("aspect_ratio"):
+                    for key in ("aspect_ratio", "aspectRatio"):
+                        params.pop(key, None)
+                    params[aspect_key] = official_format["aspect_ratio"]
+                if official_format.get("image_size"):
+                    params["image_size"] = official_format["image_size"]
+            elif mode == "official":
+                size_aspect = self._normalize_aspect_ratio_text(configured_size)
+                if size_aspect and include_aspect:
+                    for key in ("aspect_ratio", "aspectRatio"):
+                        params.pop(key, None)
+                    params[aspect_key] = size_aspect
+                else:
+                    params[size_key] = configured_size
+            else:
+                params[size_key] = configured_size
+
+        configured_aspect = self._configured_aspect_ratio()
+        if include_aspect and configured_aspect:
+            for key in ("aspect_ratio", "aspectRatio"):
+                params.pop(key, None)
+            params[aspect_key] = self._normalize_aspect_ratio_text(configured_aspect) or configured_aspect
 
     @abstractmethod
     async def generate_image(self, prompt: str, **kwargs: Any) -> str:

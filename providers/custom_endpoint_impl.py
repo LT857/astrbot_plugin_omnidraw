@@ -182,6 +182,7 @@ class CustomEndpointProvider(BaseProvider):
         ref_images = self.get_reference_images(**kwargs)
         internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
         api_kwargs = {key: value for key, value in kwargs.items() if key not in internal_keys}
+        self.apply_configured_image_defaults(api_kwargs)
         headers = {"Authorization": "Bearer " + current_key}
 
         logger.info(f"📝 [自定义通道] 最终发送给 API 的核心提示词:\n{prompt}")

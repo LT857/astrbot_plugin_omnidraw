@@ -1,5 +1,6 @@
 import aiohttp
 import base64
+import re
 from typing import Any
 
 from astrbot.api import logger
@@ -46,6 +47,77 @@ class OpenAIProvider(BaseProvider):
         mime_type = self._content_type(image_path_or_url)
         return f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode("utf-8")
 
+    def _pop_any(self, params: dict, *names: str) -> Any:
+        for name in names:
+            if name in params:
+                return params.pop(name)
+        return None
+
+    def _openai_size_from_aspect_ratio(self, value: Any) -> str:
+        text = self._normalize_aspect_ratio_text(value)
+        if not text:
+            return ""
+        match = re.fullmatch(r"(\d+):(\d+)", text)
+        if not match:
+            return ""
+        width = float(match.group(1))
+        height = float(match.group(2))
+        if width <= 0 or height <= 0:
+            return ""
+        ratio = width / height
+        model = str(self.config.model or "").lower()
+        if abs(ratio - 1.0) <= 0.08:
+            return "1024x1024"
+        if "dall-e-3" in model:
+            return "1792x1024" if ratio > 1 else "1024x1792"
+        return "1536x1024" if ratio > 1 else "1024x1536"
+
+    def _openai_size_from_value(self, value: Any, *, official_mode: bool = True) -> str:
+        text = str(value or "").strip()
+        official_format = self._parse_official_image_format(text)
+        if official_format.get("aspect_ratio"):
+            return self._openai_size_from_aspect_ratio(official_format["aspect_ratio"])
+        if official_format.get("image_size") and official_mode:
+            return "1024x1024"
+        if official_mode:
+            pixel_match = re.fullmatch(r"\s*(\d+)\s*[xX×]\s*(\d+)\s*", text)
+            if pixel_match:
+                width = int(pixel_match.group(1))
+                height = int(pixel_match.group(2))
+                model = str(self.config.model or "").lower()
+                known_sizes = {"1024x1024", "auto"}
+                if "dall-e-3" in model:
+                    known_sizes.update({"1792x1024", "1024x1792"})
+                else:
+                    known_sizes.update({"1536x1024", "1024x1536"})
+                normalized_size = f"{width}x{height}"
+                if normalized_size in known_sizes:
+                    return normalized_size
+                return self._openai_size_from_aspect_ratio(f"{width}:{height}")
+        return self._openai_size_from_aspect_ratio(text) or text
+
+    def _apply_openai_image_options(self, api_kwargs: dict) -> None:
+        configured_size = self._configured_image_size()
+        configured_aspect = self._configured_aspect_ratio()
+        official_mode = self._configured_resolution_mode() == "official"
+        explicit_size = self._pop_any(api_kwargs, "size", "image_size", "imageSize")
+        explicit_aspect = self._pop_any(api_kwargs, "aspect_ratio", "aspectRatio")
+
+        if configured_size:
+            api_kwargs["size"] = self._openai_size_from_value(configured_size, official_mode=official_mode)
+            return
+        if configured_aspect:
+            configured_ratio_size = self._openai_size_from_aspect_ratio(configured_aspect)
+            if configured_ratio_size:
+                api_kwargs["size"] = configured_ratio_size
+            return
+        if explicit_size:
+            api_kwargs["size"] = self._openai_size_from_value(explicit_size, official_mode=False)
+            return
+        derived_size = self._openai_size_from_aspect_ratio(explicit_aspect)
+        if derived_size:
+            api_kwargs["size"] = derived_size
+
     async def generate_image(self, prompt: str, **kwargs: Any) -> str:
         current_key = self.get_current_key()
         if not current_key:
@@ -59,6 +131,7 @@ class OpenAIProvider(BaseProvider):
         # 🚀 剥离内置参数，剩下的全是用户或 LLM 透传的高级参数
         internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
         api_kwargs = {k: v for k, v in kwargs.items() if k not in internal_keys}
+        self._apply_openai_image_options(api_kwargs)
 
         if ref_images:
             url = build_image_edits_endpoint(base_url)

@@ -48,12 +48,13 @@ const mockConfig = {
     router_config: { chain_text2img: "node_1", chain_selfie: "node_1", chain_video: "video_node_1" },
     presets: ["写真:daily smartphone portrait --size 1024x1024"],
     providers: [
-        { id: "node_1", api_type: "openai_image", base_url: "https://api.example.com/v1", model: "gpt-image-1", available_models: ["gpt-image-1", "dall-e-3"], timeout: 60, api_keys: "" }
+        { id: "node_1", api_type: "openai_image", base_url: "https://api.example.com/v1", model: "gpt-image-1", available_models: ["gpt-image-1", "dall-e-3"], image_resolution_mode: "official", image_size: "", aspect_ratio: "", timeout: 60, api_keys: "" }
     ],
     video_providers: [
         { id: "video_node_1", api_type: "async_task", base_url: "https://api.example.com/v1", model: "veo", available_models: ["veo"], timeout: 300, api_keys: "" }
     ],
     verbose_report: false,
+    hide_preset_prompt: true,
     show_generation_time: false,
     show_request_model: false
 };
@@ -92,6 +93,8 @@ const bridge = window.AstrBotPluginPage || {
     }
 };
 
+const transparentPixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
 let state = {
     permission_config: { usable_users: "", allowed_users: "", blocked_users: "", unlimited_groups: "" },
     usage_config: {
@@ -105,7 +108,9 @@ let state = {
     cache_config: { ...defaultCacheConfig },
     cache_stats: JSON.parse(JSON.stringify(mockCacheStats)),
     reply_config: { ...defaultReplyConfig },
-    persona_config: { active_persona_id: "default", profiles: [], persona_ref_image: [] },
+    persona_config: { active_persona_id: "default", profiles: [], persona_ref_image: [], active_time_period: "day" },
+    persona_period: "day",
+    time_period_hours: { morning: { start: 6, end: 9 }, day: { start: 9, end: 18 }, evening: { start: 18, end: 6 } },
     optimizer_config: {},
     router_config: {},
     route_backup_enabled: { text2img: false, selfie: false, video: false },
@@ -113,6 +118,7 @@ let state = {
     providers: [],
     video_providers: [],
     verbose_report: false,
+    hide_preset_prompt: true,
     show_generation_time: false,
     show_request_model: false
 };
@@ -133,12 +139,14 @@ function escapeHtml(value) {
 
 function parsePreset(rawPreset) {
     if (typeof rawPreset === "object" && rawPreset !== null) {
-        return { name: rawPreset.name || "", prompt: rawPreset.prompt || "" };
+        return { name: rawPreset.name || "", prompt: rawPreset.prompt || "", hidden: Boolean(rawPreset.hidden) };
     }
     const text = String(rawPreset || "");
-    const idx = text.indexOf(":");
-    if (idx === -1) return { name: text, prompt: "" };
-    return { name: text.slice(0, idx), prompt: text.slice(idx + 1) };
+    const isHidden = text.startsWith("#");
+    const content = isHidden ? text.slice(1) : text;
+    const idx = content.indexOf(":");
+    if (idx === -1) return { name: content, prompt: "", hidden: isHidden };
+    return { name: content.slice(0, idx), prompt: content.slice(idx + 1), hidden: isHidden };
 }
 
 const deepFind = (obj, keys, def = "") => {
@@ -165,16 +173,19 @@ function mergeUniqueModels(...groups) {
 }
 
 function applyImageProviderDefaults(provider) {
-    if (!provider || provider.api_type !== "gemini_official") return provider;
-    if (!String(provider.base_url || "").trim() || provider.base_url === "https://api.example.com/v1") {
-        provider.base_url = GEMINI_OFFICIAL_BASE_URL;
+    if (!provider) return provider;
+    provider.image_resolution_mode = provider.image_resolution_mode === "custom" ? "custom" : "official";
+    if (provider.api_type === "gemini_official") {
+        if (!String(provider.base_url || "").trim() || provider.base_url === "https://api.example.com/v1") {
+            provider.base_url = GEMINI_OFFICIAL_BASE_URL;
+        }
+        provider.available_models = mergeUniqueModels(provider.available_models || [], GEMINI_DEFAULT_MODELS);
+        if (!String(provider.model || "").trim()) {
+            provider.model = provider.available_models[0] || GEMINI_DEFAULT_MODEL;
+        }
+        const timeout = parseFloat(provider.timeout);
+        provider.timeout = Number.isFinite(timeout) && timeout >= 120 ? timeout : 120;
     }
-    provider.available_models = mergeUniqueModels(provider.available_models || [], GEMINI_DEFAULT_MODELS);
-    if (!String(provider.model || "").trim()) {
-        provider.model = provider.available_models[0] || GEMINI_DEFAULT_MODEL;
-    }
-    const timeout = parseFloat(provider.timeout);
-    provider.timeout = Number.isFinite(timeout) && timeout >= 120 ? timeout : 120;
     return provider;
 }
 
@@ -348,6 +359,111 @@ function normalizePersonaImages(value) {
     return [];
 }
 
+function normalizePeriodKey(value, fallback = "day") {
+    const period = String(value || "").trim();
+    return ["morning", "day", "evening"].includes(period) ? period : fallback;
+}
+
+function normalizeTimePeriodRefs(value = {}) {
+    const refs = value && typeof value === "object" ? value : {};
+    return {
+        morning: normalizePersonaImages(refs.morning || []),
+        day: normalizePersonaImages(refs.day || []),
+        evening: normalizePersonaImages(refs.evening || [])
+    };
+}
+
+function detectCurrentPeriod(hour = new Date().getHours()) {
+    for (const periodKey of ["morning", "day", "evening"]) {
+        const period = state.time_period_hours?.[periodKey] || {};
+        const start = Number.isFinite(parseInt(period.start, 10)) ? parseInt(period.start, 10) : 0;
+        const end = Number.isFinite(parseInt(period.end, 10)) ? parseInt(period.end, 10) : 0;
+        if (end > start) {
+            if (hour >= start && hour < end) return periodKey;
+        } else if (hour >= start || hour < end) {
+            return periodKey;
+        }
+    }
+    return "day";
+}
+
+function isPreviewImageRef(value) {
+    const ref = String(value || "");
+    return ref.includes("astrbot_plugin_omnidraw/get_image")
+        || ref.includes("astrbot_plugin_omnidraw_tuo/get_image");
+}
+
+function extractPreviewToken(value) {
+    const ref = String(value || "");
+    if (!ref) return "";
+    try {
+        const parsed = new URL(ref, window.location.origin);
+        return parsed.searchParams.get("token") || "";
+    } catch {
+        const match = ref.match(/[?&]token=([^&]+)/);
+        return match ? decodeURIComponent(match[1]) : "";
+    }
+}
+
+function setPreviewImageSource(img, value) {
+    const ref = String(value || "");
+    img.loading = "lazy";
+    img.decoding = "async";
+    if (!ref) {
+        img.removeAttribute("src");
+        img.classList.add("is-missing");
+        return;
+    }
+    if (!isPreviewImageRef(ref)) {
+        img.src = ref;
+        return;
+    }
+
+    const token = extractPreviewToken(ref);
+    img.src = transparentPixel;
+    img.classList.add("is-loading");
+    img.title = "点击加载参考图预览";
+    if (!token) {
+        img.classList.replace("is-loading", "is-missing");
+        return;
+    }
+
+    const loadPreview = async () => {
+        if (img.dataset.loadingPreview === "1") return;
+        img.dataset.loadingPreview = "1";
+        try {
+            const res = await bridge.apiPost("get_image_data", { token });
+            if (!img.isConnected) return;
+            if (res?.success && res.image) {
+                img.src = res.image;
+                img.classList.remove("is-loading", "is-missing");
+                img.title = "";
+            } else {
+                img.classList.replace("is-loading", "is-missing");
+                img.title = "预览加载失败，请重新上传";
+            }
+        } catch (error) {
+            console.warn("[OmniDraw] 参考图预览加载失败", error);
+            if (img.isConnected) {
+                img.classList.replace("is-loading", "is-missing");
+                img.title = "预览加载失败，请重新上传";
+            }
+        } finally {
+            delete img.dataset.loadingPreview;
+        }
+    };
+    img.addEventListener("click", loadPreview, { once: false });
+}
+
+function totalPersonaImages(profile) {
+    const shared = normalizePersonaImages(profile.persona_ref_image).length;
+    const tpr = normalizeTimePeriodRefs(profile.time_period_refs || {});
+    const periodCount = (normalizePersonaImages(tpr.morning).length +
+        normalizePersonaImages(tpr.day).length +
+        normalizePersonaImages(tpr.evening).length);
+    return Math.max(shared, periodCount);
+}
+
 function makePersonaId(seed, fallbackIndex = 1) {
     const ascii = String(seed || "")
         .trim()
@@ -384,33 +500,37 @@ function normalizePersonaProfiles(rawPersonaConfig = {}) {
         const source = profile && typeof profile === "object" ? profile : {};
         const name = String(source.persona_name || source.name || (index === 0 ? "默认助理" : `人设 ${index + 1}`)).trim() || (index === 0 ? "默认助理" : `人设 ${index + 1}`);
         const id = uniquePersonaId(source.id || (index === 0 ? "default" : name), index, usedIds);
+        const rawPeriodRefs = normalizeTimePeriodRefs(source.time_period_refs || {});
         return {
             id,
             persona_name: name,
             persona_base_prompt: String(source.persona_base_prompt || source.base_prompt || ""),
-            persona_ref_image: normalizePersonaImages(source.persona_ref_image || source.persona_ref_images || source.ref_images)
+            persona_ref_image: normalizePersonaImages(source.persona_ref_image || source.persona_ref_images || source.ref_images),
+            time_period_refs: rawPeriodRefs
         };
     });
 
     if (!profiles.length) {
-        profiles.push({ id: "default", persona_name: "默认助理", persona_base_prompt: "", persona_ref_image: [] });
+        profiles.push({ id: "default", persona_name: "默认助理", persona_base_prompt: "", persona_ref_image: [], time_period_refs: { morning: [], day: [], evening: [] } });
     }
 
     const requestedActive = String(rawPersonaConfig.active_persona_id || "").trim();
     const requestedActiveLower = requestedActive.toLowerCase();
     const activeProfile = profiles.find((profile) => profile.id === requestedActive || profile.id.toLowerCase() === requestedActiveLower) || profiles[0];
+    const activeTimePeriod = normalizePeriodKey(rawPersonaConfig.active_time_period, "day");
     return {
         active_persona_id: activeProfile.id,
         profiles,
         persona_name: activeProfile.persona_name,
         persona_base_prompt: activeProfile.persona_base_prompt,
-        persona_ref_image: activeProfile.persona_ref_image
+        persona_ref_image: activeProfile.persona_ref_image,
+        active_time_period: activeTimePeriod
     };
 }
 
 function getActivePersona() {
     if (!Array.isArray(state.persona_config.profiles) || !state.persona_config.profiles.length) {
-        state.persona_config.profiles = [{ id: "default", persona_name: "默认助理", persona_base_prompt: "", persona_ref_image: [] }];
+        state.persona_config.profiles = [{ id: "default", persona_name: "默认助理", persona_base_prompt: "", persona_ref_image: [], time_period_refs: { morning: [], day: [], evening: [] } }];
     }
     let active = state.persona_config.profiles.find((profile) => profile.id === state.persona_config.active_persona_id);
     if (!active) {
@@ -418,6 +538,7 @@ function getActivePersona() {
         state.persona_config.active_persona_id = active.id;
     }
     active.persona_ref_image = normalizePersonaImages(active.persona_ref_image);
+    active.time_period_refs = normalizeTimePeriodRefs(active.time_period_refs);
     return active;
 }
 
@@ -436,6 +557,17 @@ function writeActivePersonaFieldsFromForm() {
     if (nameInput) active.persona_name = nameInput.value.trim() || "未命名人设";
     if (promptInput) active.persona_base_prompt = promptInput.value;
     syncActivePersonaMirror();
+}
+
+function switchPersonaPeriod(period) {
+    const nextPeriod = normalizePeriodKey(period, state.persona_period || "day");
+    writeActivePersonaFieldsFromForm();
+    state.persona_period = nextPeriod;
+    state.persona_config.active_time_period = nextPeriod;
+    syncActivePersonaMirror();
+    renderPersonaImages();
+    renderPersonaProfiles();
+    setDirty();
 }
 
 function bindPersonaFields() {
@@ -788,7 +920,7 @@ function renderPersonaProfiles() {
         return `
             <button type="button" class="persona-profile-chip ${isActive ? "active" : ""}" data-action="switch-persona" data-index="${index}">
                 <span class="persona-profile-name">${escapeHtml(profile.persona_name || "未命名人设")}</span>
-                <small>${escapeHtml(profile.id)} · ${normalizePersonaImages(profile.persona_ref_image).length} 图</small>
+                <small>${escapeHtml(profile.id)} · ${totalPersonaImages(profile)} 图</small>
                 ${deleteControl}
             </button>
         `;
@@ -798,17 +930,52 @@ function renderPersonaProfiles() {
 function renderPersonaImages() {
     const container = byId("persona-upload-container");
     if (!container) return;
-    syncActivePersonaMirror();
     container.querySelectorAll(".image-preview-wrapper").forEach((el) => el.remove());
     const trigger = byId("persona-upload-trigger");
-    const images = getActivePersona().persona_ref_image || [];
+    const period = state.persona_period || "day";
+    const periodLabels = { morning: "早上", day: "白天", evening: "晚上" };
+    const labelEl = byId("persona-period-label");
+    if (labelEl) labelEl.textContent = periodLabels[period] || "白天";
+
+    // 更新时段tab：高亮选中的tab，标记当前激活时段
+    const activePeriod = state.persona_config.active_time_period || "day";
+    document.querySelectorAll(".period-tab").forEach((tab) => {
+        const tabPeriod = tab.getAttribute("data-period");
+        tab.classList.toggle("active", tabPeriod === period);
+        tab.classList.toggle("is-current", tabPeriod === activePeriod);
+        const badge = tab.querySelector(".period-badge");
+        if (tabPeriod === activePeriod) {
+            if (!badge) {
+                const span = document.createElement("span");
+                span.className = "period-badge";
+                span.textContent = "✓";
+                tab.appendChild(span);
+            }
+        } else if (badge) {
+            badge.remove();
+        }
+    });
+
+    // 更新时段小时输入
+    const periodHours = state.time_period_hours[period] || { start: 6, end: 9 };
+    const startInput = byId("period-start");
+    const endInput = byId("period-end");
+    if (startInput) startInput.value = periodHours.start ?? 6;
+    if (endInput) endInput.value = periodHours.end ?? 9;
+
+    const activePersona = getActivePersona();
+    // 优先使用时段专用参考图，若为空则回退到共享参考图
+    let images = (activePersona.time_period_refs && activePersona.time_period_refs[period]) || [];
+    if (!images.length) {
+        images = activePersona.persona_ref_image || [];
+    }
     images.forEach((url, idx) => {
         const wrapper = document.createElement("div");
         wrapper.className = "image-preview-wrapper";
         const img = document.createElement("img");
-        img.src = String(url || "");
         img.className = "image-preview";
         img.alt = `Reference ${idx + 1}`;
+        setPreviewImageSource(img, url);
         const button = document.createElement("button");
         button.className = "btn-del-img";
         button.dataset.action = "del-persona-img";
@@ -818,6 +985,64 @@ function renderPersonaImages() {
         wrapper.append(img, button);
         container.insertBefore(wrapper, trigger);
     });
+    renderCurrentReferenceView();
+}
+
+function getCurrentReferenceInfo() {
+    const activePersona = getActivePersona();
+    const period = detectCurrentPeriod();
+    const periodLabels = { morning: "早上", day: "白天", evening: "晚上" };
+    const periodRefs = normalizePersonaImages(activePersona.time_period_refs?.[period] || []);
+    const sharedRefs = normalizePersonaImages(activePersona.persona_ref_image || []);
+    const refs = periodRefs.length ? periodRefs : sharedRefs;
+    return {
+        activePersona,
+        period,
+        periodLabel: periodLabels[period] || "白天",
+        refs,
+        sourceLabel: periodRefs.length ? "时段专用" : (sharedRefs.length ? "共享兜底" : "暂无参考图"),
+        note: periodRefs.length
+            ? `当前 /自拍 会使用「${periodLabels[period] || "白天"}」时段专用参考图。点击占位图可加载单张预览。`
+            : sharedRefs.length
+                ? `当前时段没有专用图，/自拍 会使用该人设的共享参考图。点击占位图可加载单张预览。`
+                : "当前人设没有可用参考图。"
+    };
+}
+
+function renderCurrentReferenceView() {
+    const container = byId("current-ref-container");
+    if (!container) return;
+    if (!byId("tab-current-refs")?.classList.contains("active")) return;
+    const info = getCurrentReferenceInfo();
+    const personaEl = byId("current-ref-persona");
+    const periodEl = byId("current-ref-period");
+    const sourceEl = byId("current-ref-source");
+    const countEl = byId("current-ref-count");
+    const noteEl = byId("current-ref-note");
+    if (personaEl) personaEl.textContent = info.activePersona.persona_name || "默认助理";
+    if (periodEl) periodEl.textContent = info.periodLabel;
+    if (sourceEl) sourceEl.textContent = info.sourceLabel;
+    if (countEl) countEl.textContent = String(info.refs.length);
+    if (noteEl) noteEl.textContent = info.note;
+
+    container.innerHTML = "";
+    if (!info.refs.length) {
+        container.innerHTML = '<div class="empty-state readonly-empty">当前没有可展示的参考图</div>';
+        return;
+    }
+    info.refs.forEach((url, idx) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = "image-preview-wrapper readonly-ref-item";
+        const img = document.createElement("img");
+        img.className = "image-preview";
+        img.alt = `Current reference ${idx + 1}`;
+        setPreviewImageSource(img, url);
+        const badge = document.createElement("span");
+        badge.className = "readonly-ref-index";
+        badge.textContent = `#${idx + 1}`;
+        wrapper.append(img, badge);
+        container.appendChild(wrapper);
+    });
 }
 
 function renderPresets() {
@@ -826,6 +1051,9 @@ function renderPresets() {
             <input type="text" class="input-glass preset-name" placeholder="快捷指令名" value="${escapeHtml(p.name)}" data-sync="preset-name" data-index="${i}">
             <span class="preset-arrow">→</span>
             <input type="text" class="input-glass preset-prompt" placeholder="底层提示词与参数" value="${escapeHtml(p.prompt)}" data-sync="preset-prompt" data-index="${i}">
+            <label class="preset-hidden-label" title="隐藏后不在列表中显示，但仍可使用">
+                <input type="checkbox" data-sync="preset-hidden" data-index="${i}" ${p.hidden ? "checked" : ""}> 隐藏
+            </label>
             <button data-action="del-preset" data-index="${i}" class="btn-glass-secondary btn-danger" type="button">移除</button>
         </div>
     `).join("");
@@ -875,6 +1103,32 @@ function renderProviderCard(p, i, isVideo) {
             <span class="chip-del" data-action="${delModelAction}" data-index="${i}" data-midx="${modelIdx}">×</span>
         </button>
     `).join("") || '<span class="empty-hint">暂无模型</span>';
+    const resolutionMode = p.image_resolution_mode === "custom" ? "custom" : "official";
+    const resolutionModeChips = `
+        <button type="button" class="api-chip ${resolutionMode === "official" ? "active" : ""}" data-sync="prov-res-mode" data-index="${i}" data-val="official">官方比例+K</button>
+        <button type="button" class="api-chip ${resolutionMode === "custom" ? "active" : ""}" data-sync="prov-res-mode" data-index="${i}" data-val="custom">自定义像素</button>
+    `;
+    const sizeLabel = resolutionMode === "custom" ? "自定义分辨率" : "官方尺寸格式";
+    const sizePlaceholder = resolutionMode === "custom" ? "1024x1536 / 2048x2048" : "9:16 4K / 16:9 2K / 2Kx2K";
+    const sizeHint = resolutionMode === "custom"
+        ? "原样作为 size 发送；Gemini 官方会换算成官方 imageConfig。"
+        : "支持 9:16 4K、4K 9:16、2Kx2K 这类格式。";
+    const imageOptionFields = isVideo ? "" : `
+                <div class="form-group">
+                    <label>尺寸格式模式</label>
+                    <div class="chip-group">${resolutionModeChips}</div>
+                </div>
+                <div class="form-group">
+                    <label>${sizeLabel}</label>
+                    <input type="text" class="input-glass" value="${escapeHtml(p.image_size || "")}" data-sync="prov-size" data-index="${i}" placeholder="${sizePlaceholder}">
+                    <small>${sizeHint}</small>
+                </div>
+                <div class="form-group">
+                    <label>单独宽高比（可选）</label>
+                    <input type="text" class="input-glass" value="${escapeHtml(p.aspect_ratio || "")}" data-sync="prov-ratio" data-index="${i}" placeholder="1:1 / 16:9 / 9:16">
+                    <small>填写后会覆盖上面尺寸里的比例，配置优先。</small>
+                </div>
+    `;
 
     return `
         <div class="node-card">
@@ -899,6 +1153,7 @@ function renderProviderCard(p, i, isVideo) {
                         <button data-action="${addModelAction}" data-index="${i}" class="btn-glass-secondary" type="button">添加模型</button>
                     </div>
                 </div>
+                ${imageOptionFields}
                 <div class="form-group">
                     <label>请求超时</label>
                     <input type="number" class="input-glass" value="${escapeHtml(p.timeout)}" min="1" data-sync="${prefix}-time" data-index="${i}">
@@ -942,6 +1197,7 @@ function bindBasicFields() {
     byId("opt_batch").value = state.optimizer_config.max_batch_count || 0;
     byId("opt_custom").value = state.optimizer_config.optimizer_custom_prompt || "";
     byId("verbose_report").checked = Boolean(state.verbose_report);
+    byId("hide_preset_prompt").checked = state.hide_preset_prompt !== false;
     byId("show_generation_time").checked = Boolean(state.show_generation_time);
     byId("show_request_model").checked = Boolean(state.show_request_model);
 }
@@ -979,24 +1235,42 @@ function readBasicFields() {
     state.optimizer_config.max_batch_count = parseInt(byId("opt_batch").value, 10) || 0;
     state.optimizer_config.optimizer_custom_prompt = byId("opt_custom").value;
     state.verbose_report = byId("verbose_report").checked;
+    state.hide_preset_prompt = byId("hide_preset_prompt").checked;
     state.show_generation_time = byId("show_generation_time").checked;
     state.show_request_model = byId("show_request_model").checked;
 }
 
 function buildPayload() {
     readBasicFields();
+    // 同步时段参考图数据到 profiles
+    const personaProfiles = (state.persona_config.profiles || []).map((profile) => ({
+        id: profile.id,
+        persona_name: profile.persona_name,
+        persona_base_prompt: profile.persona_base_prompt || "",
+        persona_ref_image: profile.persona_ref_image || [],
+        time_period_refs: normalizeTimePeriodRefs(profile.time_period_refs)
+    }));
     return {
         permission_config: state.permission_config,
         usage_config: state.usage_config,
         cache_config: state.cache_config,
         reply_config: state.reply_config,
-        persona_config: state.persona_config,
+        persona_config: {
+            active_persona_id: state.persona_config.active_persona_id,
+            active_time_period: normalizePeriodKey(state.persona_config.active_time_period || state.persona_period, "day"),
+            time_period_hours: state.time_period_hours || { morning: { start: 6, end: 9 }, day: { start: 9, end: 18 }, evening: { start: 18, end: 6 } },
+            profiles: personaProfiles,
+            persona_name: state.persona_config.persona_name,
+            persona_base_prompt: state.persona_config.persona_base_prompt,
+            persona_ref_image: state.persona_config.persona_ref_image
+        },
         optimizer_config: state.optimizer_config,
         router_config: state.router_config,
-        presets: state.presets.filter((p) => p.name.trim()).map((p) => `${p.name.trim()}:${p.prompt || ""}`),
+        presets: state.presets.filter((p) => p.name.trim()).map((p) => (p.hidden ? `#${p.name.trim()}:${p.prompt || ""}` : `${p.name.trim()}:${p.prompt || ""}`)),
         providers: state.providers,
         video_providers: state.video_providers,
         verbose_report: state.verbose_report,
+        hide_preset_prompt: state.hide_preset_prompt,
         show_generation_time: state.show_generation_time,
         show_request_model: state.show_request_model
     };
@@ -1063,6 +1337,7 @@ function setActiveTab(navItem) {
     content?.classList.add("is-switching");
     document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item === navItem));
     document.querySelectorAll(".tab-pane").forEach((pane) => pane.classList.toggle("active", pane === targetPane));
+    if (targetId === "tab-current-refs") renderCurrentReferenceView();
     byId("active-title").textContent = targetPane.dataset.title || navItem.textContent.trim();
     navItem.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
     window.setTimeout(() => content?.classList.remove("is-switching"), 260);
@@ -1119,6 +1394,7 @@ function switchPersona(index) {
     if (!profiles[index]) return;
     writeActivePersonaFieldsFromForm();
     state.persona_config.active_persona_id = profiles[index].id;
+    state.persona_period = normalizePeriodKey(state.persona_config.active_time_period, "day");
     bindPersonaFields();
     renderPersonaProfiles();
     renderPersonaImages();
@@ -1135,7 +1411,8 @@ function addPersona() {
         id,
         persona_name: `人设 ${index + 1}`,
         persona_base_prompt: "",
-        persona_ref_image: []
+        persona_ref_image: [],
+        time_period_refs: { morning: [], day: [], evening: [] }
     };
     state.persona_config.profiles.push(profile);
     state.persona_config.active_persona_id = profile.id;
@@ -1179,6 +1456,17 @@ function setupEventDelegation() {
     const clearPressed = () => {
         document.querySelectorAll(".is-pressing").forEach((item) => item.classList.remove("is-pressing"));
     };
+    document.addEventListener("focusin", (e) => {
+        const input = e.target;
+        if (input.hasAttribute("data-sync")) {
+            const s = input.getAttribute("data-sync");
+            if (["prov-id", "vid-id"].includes(s)) {
+                const i = parseInt(input.getAttribute("data-index"), 10);
+                const list = s === "prov-id" ? state.providers : state.video_providers;
+                state._changing_provider_old_id = list[i]?.id || "";
+            }
+        }
+    });
     document.addEventListener("pointerup", clearPressed);
     document.addEventListener("pointercancel", clearPressed);
     document.addEventListener("pointerleave", clearPressed);
@@ -1215,6 +1503,7 @@ function setupEventDelegation() {
                 applyImageProviderDefaults(state.providers[idx]);
             }
             if (sync === "vid-api") state.video_providers[idx].api_type = val;
+            if (sync === "prov-res-mode") state.providers[idx].image_resolution_mode = val;
             if (sync === "prov-model-select") state.providers[idx].model = val;
             if (sync === "vid-model-select") state.video_providers[idx].model = val;
             sync.startsWith("vid") ? renderVideoProviders() : renderProviders();
@@ -1224,6 +1513,13 @@ function setupEventDelegation() {
 
         if (e.target.closest("#persona-upload-trigger")) {
             fileInput.click();
+            return;
+        }
+
+        const periodTab = e.target.closest(".period-tab");
+        if (periodTab) {
+            const period = periodTab.getAttribute("data-period");
+            if (period) switchPersonaPeriod(period);
             return;
         }
 
@@ -1265,7 +1561,7 @@ function setupEventDelegation() {
         }
         if (act === "del-preset") animateDel("presets-container", state.presets, idx, renderPresets);
         if (act === "add-provider") {
-            state.providers.push({ id: `node_${state.providers.length + 1}`, api_type: "openai_image", base_url: "", model: "", available_models: [], api_keys: "", timeout: 60 });
+            state.providers.push({ id: `node_${state.providers.length + 1}`, api_type: "openai_image", base_url: "", model: "", available_models: [], image_resolution_mode: "official", image_size: "", aspect_ratio: "", api_keys: "", timeout: 60 });
             renderProviders();
             renderSelectors();
             animateAdd("providers-container");
@@ -1281,7 +1577,15 @@ function setupEventDelegation() {
         }
         if (act === "del-video-provider") animateDel("video-providers-container", state.video_providers, idx, renderVideoProviders, renderSelectors);
         if (act === "del-persona-img") {
-            animateDel("persona-upload-container", getActivePersona().persona_ref_image, idx, () => {
+            const period = state.persona_period || "day";
+            const activePersona = getActivePersona();
+            activePersona.time_period_refs = activePersona.time_period_refs || { morning: [], day: [], evening: [] };
+            activePersona.time_period_refs[period] = activePersona.time_period_refs[period] || [];
+            // 若当前时段有专用图则删除时段图，否则删除共享图
+            const targetArray = activePersona.time_period_refs[period].length
+                ? activePersona.time_period_refs[period]
+                : (activePersona.persona_ref_image || []);
+            animateDel("persona-upload-container", targetArray, idx, () => {
                 syncActivePersonaMirror();
                 renderPersonaImages();
                 renderPersonaProfiles();
@@ -1307,6 +1611,16 @@ function setupEventDelegation() {
 
     document.body.addEventListener("input", (e) => {
         const input = e.target;
+        // 时段小时输入
+        if (input.hasAttribute("data-period-hour")) {
+            const field = input.getAttribute("data-period-hour");
+            const period = state.persona_period || "day";
+            const val = Math.max(0, Math.min(23, parseInt(input.value, 10) || 0));
+            state.time_period_hours[period] = state.time_period_hours[period] || { start: 6, end: 9 };
+            state.time_period_hours[period][field] = val;
+            setDirty();
+            return;
+        }
         if (!input.hasAttribute("data-sync")) {
             if (["INPUT", "TEXTAREA", "SELECT"].includes(input.tagName)) setDirty();
             return;
@@ -1320,6 +1634,7 @@ function setupEventDelegation() {
             getActivePersona().persona_name = v.trim() || "未命名人设";
             syncActivePersonaMirror();
             renderPersonaProfiles();
+            renderCurrentReferenceView();
         }
         if (s === "persona-prompt") {
             getActivePersona().persona_base_prompt = v;
@@ -1327,6 +1642,8 @@ function setupEventDelegation() {
         }
         if (s === "prov-id") state.providers[i].id = v;
         if (s === "prov-url") state.providers[i].base_url = v;
+        if (s === "prov-size") state.providers[i].image_size = v.trim();
+        if (s === "prov-ratio") state.providers[i].aspect_ratio = v.trim();
         if (s === "prov-time") state.providers[i].timeout = parseFloat(v) || 60;
         if (s === "prov-keys") state.providers[i].api_keys = v;
         if (s === "vid-id") state.video_providers[i].id = v;
@@ -1343,8 +1660,33 @@ function setupEventDelegation() {
             setDirty();
             return;
         }
-        if (input.hasAttribute("data-sync") && ["prov-id", "vid-id"].includes(input.getAttribute("data-sync"))) {
-            renderSelectors();
+        if (input.hasAttribute("data-sync")) {
+            const s = input.getAttribute("data-sync");
+            const i = parseInt(input.getAttribute("data-index"), 10);
+            if (s === "preset-hidden") {
+                state.presets[i].hidden = input.checked;
+            }
+            if (["prov-id", "vid-id"].includes(s)) {
+                // 节点 ID 变更时，同步更新所有链路中的旧 ID
+                const list = s === "prov-id" ? state.providers : state.video_providers;
+                const newId = list[i]?.id || "";
+                Object.keys(routeDefs).forEach((routeName) => {
+                    const chain = splitChain(state.router_config[routeDefs[routeName].stateKey]);
+                    let changed = false;
+                    const updated = chain.map((nodeId) => {
+                        if (nodeId === state._changing_provider_old_id) {
+                            changed = true;
+                            return newId;
+                        }
+                        return nodeId;
+                    });
+                    if (changed) {
+                        writeRouteChain(routeName, updated);
+                    }
+                });
+                state._changing_provider_old_id = null;
+                renderSelectors();
+            }
         }
         setDirty();
     });
@@ -1361,17 +1703,19 @@ function setupEventDelegation() {
         if (!files.length) return;
         let loadedCount = 0;
         const activePersona = getActivePersona();
-        activePersona.persona_ref_image ||= [];
+        const period = state.persona_period || "day";
+        activePersona.time_period_refs = activePersona.time_period_refs || { morning: [], day: [], evening: [] };
+        activePersona.time_period_refs[period] = activePersona.time_period_refs[period] || [];
         files.forEach((file) => {
             const reader = new FileReader();
             reader.onload = (evt) => {
-                activePersona.persona_ref_image.push(evt.target.result);
+                activePersona.time_period_refs[period].push(evt.target.result);
                 loadedCount += 1;
                 if (loadedCount === files.length) {
                     syncActivePersonaMirror();
                     renderPersonaImages();
                     renderPersonaProfiles();
-                    showToast(`已添加 ${files.length} 张图片`);
+                    showToast(`已添加 ${files.length} 张图片到${{"morning":"早上","day":"白天","evening":"晚上"}[period]}`);
                     setDirty();
                 }
             };
@@ -1433,6 +1777,15 @@ async function init() {
         video: splitChain(state.router_config.chain_video).length > 1
     };
     state.persona_config = normalizePersonaProfiles(pers);
+    state.persona_period = normalizePeriodKey(state.persona_config.active_time_period, "day");
+    // 加载时段范围配置
+    if (pers.time_period_hours && typeof pers.time_period_hours === "object") {
+        state.time_period_hours = {
+            morning: pers.time_period_hours.morning || { start: 6, end: 9 },
+            day: pers.time_period_hours.day || { start: 9, end: 18 },
+            evening: pers.time_period_hours.evening || { start: 18, end: 6 }
+        };
+    }
 
     state.optimizer_config.enable_optimizer = deepFind(opt, ["enable_optimizer"], true);
     state.optimizer_config.optimizer_style = deepFind(opt, ["optimizer_style"], "手机日常原生感");
@@ -1446,15 +1799,18 @@ async function init() {
     state.providers = (rawConfig.providers || []).map((p) => {
         const availableModels = normalizeModelList(p.available_models?.length ? p.available_models : (p.model || p["模型名称"] || ""));
         const model = p.model && !String(p.model).includes(",") ? p.model : (availableModels[0] || "");
-        return {
+        return applyImageProviderDefaults({
             id: p.id || p["节点ID"] || "",
             api_type: p.api_type || p["接口模式"] || "openai_image",
             base_url: p.base_url || p["接口地址 (需含/v1)"] || "",
             model,
             available_models: availableModels,
+            image_resolution_mode: p.image_resolution_mode || p.resolution_mode || p["分辨率模式"] || "official",
+            image_size: p.image_size || p.imageSize || p.size || p["默认分辨率"] || "",
+            aspect_ratio: p.aspect_ratio || p.aspectRatio || p["默认宽高比"] || p["默认比例"] || "",
             timeout: p.timeout || p["超时时间(秒)"] || 60,
             api_keys: normalizeTextAreaKeys(p.api_keys || p["API密钥"] || "")
-        };
+        });
     });
 
     state.video_providers = (rawConfig.video_providers || []).map((p) => {
@@ -1472,6 +1828,7 @@ async function init() {
     });
 
     state.verbose_report = Boolean(rawConfig.verbose_report);
+    state.hide_preset_prompt = rawConfig.hide_preset_prompt !== false;
     state.show_generation_time = Boolean(rawConfig.show_generation_time);
     state.show_request_model = Boolean(rawConfig.show_request_model);
 

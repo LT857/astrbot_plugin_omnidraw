@@ -20,6 +20,7 @@ astrbot_event_components_module = types.ModuleType("astrbot.api.event.components
 astrbot_message_components_module = types.ModuleType("astrbot.api.message_components")
 astrbot_star_module = types.ModuleType("astrbot.api.star")
 quart_module = types.ModuleType("quart")
+aiohttp_module = types.ModuleType("aiohttp")
 
 
 class _Logger:
@@ -55,6 +56,28 @@ class _Video:
     @classmethod
     def fromURL(cls, url):
         return {"type": "video", "url": url}
+
+
+class _ClientTimeout:
+    def __init__(self, total=None, **kwargs):
+        self.total = total
+        self.kwargs = kwargs
+
+
+class _ClientResponse:
+    pass
+
+
+class _ClientSession:
+    pass
+
+
+class _FormData:
+    def __init__(self):
+        self._fields = []
+
+    def add_field(self, name, value, **kwargs):
+        self._fields.append(({"name": name, **kwargs}, {}, value))
 
 
 class _Image:
@@ -114,6 +137,10 @@ astrbot_star_module.register = _identity_decorator
 quart_module.jsonify = _jsonify
 quart_module.request = types.SimpleNamespace(get_json=lambda *args, **kwargs: {})
 quart_module.send_file = _send_file
+aiohttp_module.ClientResponse = _ClientResponse
+aiohttp_module.ClientSession = _ClientSession
+aiohttp_module.ClientTimeout = _ClientTimeout
+aiohttp_module.FormData = _FormData
 sys.modules.setdefault("astrbot", astrbot_module)
 sys.modules.setdefault("astrbot.api", astrbot_api_module)
 sys.modules.setdefault("astrbot.api.event", astrbot_event_module)
@@ -121,6 +148,7 @@ sys.modules.setdefault("astrbot.api.event.components", astrbot_event_components_
 sys.modules.setdefault("astrbot.api.message_components", astrbot_message_components_module)
 sys.modules.setdefault("astrbot.api.star", astrbot_star_module)
 sys.modules.setdefault("quart", quart_module)
+sys.modules.setdefault("aiohttp", aiohttp_module)
 
 models_module = importlib.import_module(f"{PACKAGE_NAME}.models")
 base_module = importlib.import_module(f"{PACKAGE_NAME}.providers.base")
@@ -407,18 +435,21 @@ class GenerationMetadataConfigTest(unittest.TestCase):
 
         self.assertFalse(config.show_generation_time)
         self.assertFalse(config.show_request_model)
+        self.assertTrue(config.hide_preset_prompt)
 
     def test_generation_metadata_toggles_are_independent(self):
         config = PluginConfig.from_dict(
             {
                 "show_generation_time": True,
                 "show_request_model": False,
+                "hide_preset_prompt": False,
             },
             str(PLUGIN_DIR),
         )
 
         self.assertTrue(config.show_generation_time)
         self.assertFalse(config.show_request_model)
+        self.assertFalse(config.hide_preset_prompt)
 
 
 class RuntimeConfigKeyTest(unittest.TestCase):
@@ -525,7 +556,7 @@ class ImageSuccessComponentsTest(unittest.TestCase):
 class FastPresetListTest(unittest.TestCase):
     def _plugin(self, presets):
         plugin = object.__new__(OmniDrawPlugin)
-        plugin.plugin_config = types.SimpleNamespace(presets=presets)
+        plugin.plugin_config = types.SimpleNamespace(presets=presets, presets_hidden=[], hide_preset_prompt=True)
         return plugin
 
     def test_fast_preset_list_only_contains_preset_names(self):
@@ -569,6 +600,29 @@ class FastPresetListTest(unittest.TestCase):
         self.assertIn("名称：胶片少女", message)
         self.assertIn("提示词：35mm film portrait", message)
 
+    def test_preset_trigger_accepts_prefixed_and_bare_name(self):
+        plugin = self._plugin({"胶片少女": "35mm film portrait", "胶片": "film"})
+
+        self.assertEqual(plugin._match_preset_trigger("/胶片少女"), "胶片少女")
+        self.assertEqual(plugin._match_preset_trigger("胶片少女"), "胶片少女")
+        self.assertEqual(plugin._match_preset_trigger("胶片少女 参考这张图"), "胶片少女")
+        self.assertEqual(plugin._match_preset_trigger("胶片少女风格"), "")
+        self.assertEqual(plugin._match_preset_trigger("随便聊天"), "")
+
+    def test_preset_verbose_report_can_hide_prompt(self):
+        plugin = self._plugin({"胶片少女": "secret prompt"})
+
+        self.assertEqual(plugin._preset_prompt_for_reply("secret prompt"), "已隐藏")
+        hidden_report = plugin._build_preset_verbose_report("secret prompt", 2)
+        self.assertNotIn("secret prompt", hidden_report)
+        self.assertIn("实际参考图：2 张", hidden_report)
+
+        plugin.plugin_config.hide_preset_prompt = False
+        self.assertEqual(plugin._preset_prompt_for_reply("secret prompt"), "secret prompt")
+        visible_report = plugin._build_preset_verbose_report("secret prompt", 2)
+        self.assertIn("宏对应提示词: secret prompt", visible_report)
+        self.assertIn("实际参考图：2 张", visible_report)
+
     def test_fast_preset_list_handles_empty_presets(self):
         message = self._plugin({})._build_fast_preset_list_message()
 
@@ -584,7 +638,7 @@ class FastPresetListTest(unittest.TestCase):
     def test_upsert_and_delete_preset_update_runtime_presets(self):
         plugin = self._plugin({"旧预设": "old prompt"})
 
-        def replace_presets(presets):
+        def replace_presets(presets, hidden=None):
             plugin.plugin_config = types.SimpleNamespace(presets=dict(presets))
 
         plugin._replace_presets = replace_presets

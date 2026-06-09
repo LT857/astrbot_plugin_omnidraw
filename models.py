@@ -19,7 +19,7 @@ from .utils import save_image_bytes, split_data_url
 
 PLUGIN_NAME = "astrbot_plugin_omnidraw"
 PLUGIN_AUTHOR = "雪碧bir"
-PLUGIN_VERSION = "3.3.18"
+PLUGIN_VERSION = "3.3.19"
 DEFAULT_CACHE_CLEANUP_INTERVAL_HOURS = 24
 DEFAULT_MAX_CACHE_SIZE_MB = 512
 
@@ -33,6 +33,9 @@ class ProviderConfig:
     model: str
     timeout: float
     available_models: List[str] = field(default_factory=list)
+    image_resolution_mode: str = "official"
+    image_size: str = ""
+    aspect_ratio: str = ""
 
     @property
     def has_api_key(self) -> bool:
@@ -45,6 +48,7 @@ class PersonaProfile:
     name: str
     base_prompt: str
     ref_images: List[str] = field(default_factory=list)
+    time_period_refs: Dict[str, List[str]] = field(default_factory=lambda: {"morning": [], "day": [], "evening": []})
 
     def to_config_dict(self) -> Dict[str, Any]:
         return {
@@ -52,6 +56,9 @@ class PersonaProfile:
             "persona_name": self.name,
             "persona_base_prompt": self.base_prompt,
             "persona_ref_image": list(self.ref_images),
+            "time_period_refs": {
+                k: list(v) for k, v in self.time_period_refs.items()
+            },
         }
 
 
@@ -61,6 +68,7 @@ class PluginConfig:
     video_providers: List[ProviderConfig]
     chains: Dict[str, List[str]]
     presets: Dict[str, str]
+    presets_hidden: List[str]
     enable_optimizer: bool
     optimizer_model: str
     optimizer_timeout: float
@@ -92,8 +100,12 @@ class PluginConfig:
     draw_error_message: str
     selfie_error_message: str
     verbose_report: bool
+    hide_preset_prompt: bool
     show_generation_time: bool
     show_request_model: bool
+    active_time_period: str
+    persona_time_period_refs: Dict[str, List[str]]
+    time_period_hours: Dict[str, Dict[str, int]]
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any], data_dir: str) -> "PluginConfig":
@@ -109,20 +121,33 @@ class PluginConfig:
         video_providers = [provider for provider in video_providers if provider.id]
 
         presets_dict = {}
+        presets_hidden = []
         normalized_presets = []
         for preset in _as_list(config_dict.get("presets", [])):
             if isinstance(preset, dict):
                 name = str(preset.get("name", "")).strip()
                 prompt = str(preset.get("prompt", "")).strip()
+                is_hidden = bool(preset.get("hidden"))
             elif isinstance(preset, str) and ":" in preset:
-                name, prompt = preset.split(":", 1)
+                raw_text = preset.strip()
+                is_hidden = raw_text.startswith("#")
+                if is_hidden:
+                    raw_text = raw_text[1:]
+                if ":" in raw_text:
+                    name, prompt = raw_text.split(":", 1)
+                else:
+                    continue
                 name = name.strip()
                 prompt = prompt.strip()
             else:
                 continue
             if name:
                 presets_dict[name] = prompt
-                normalized_presets.append(f"{name}:{prompt}")
+                if is_hidden:
+                    presets_hidden.append(name)
+                    normalized_presets.append(f"#{name}:{prompt}")
+                else:
+                    normalized_presets.append(f"{name}:{prompt}")
         config_dict["presets"] = normalized_presets
 
         persona_conf = _ensure_dict(config_dict, "persona_config")
@@ -137,12 +162,50 @@ class PluginConfig:
             if legacy_key in config_dict and legacy_key not in persona_conf:
                 persona_conf[legacy_key] = config_dict[legacy_key]
 
+        active_time_period = str(persona_conf.get("active_time_period", "day")).strip()
+        if active_time_period not in ("morning", "day", "evening"):
+            active_time_period = "day"
+        persona_conf["active_time_period"] = active_time_period
+
+        # 时段范围配置（默认: 早上6-9, 白天9-18, 晚上18-6）
+        raw_period_hours = persona_conf.get("time_period_hours", {})
+        if not isinstance(raw_period_hours, dict):
+            raw_period_hours = {}
+
+        def _parse_period_hour(raw: Any, default: int) -> int:
+            val = _to_int(raw, default)
+            return max(0, min(23, val))
+
+        def _period_hours(key: str, default_start: int, default_end: int) -> Dict[str, int]:
+            period = raw_period_hours.get(key, {})
+            if not isinstance(period, dict):
+                period = {}
+            return {
+                "start": _parse_period_hour(period.get("start"), default_start),
+                "end": _parse_period_hour(period.get("end"), default_end),
+            }
+
+        time_period_hours = {
+            "morning": _period_hours("morning", 6, 9),
+            "day": _period_hours("day", 9, 18),
+            "evening": _period_hours("evening", 18, 6),
+        }
+        persona_conf["time_period_hours"] = time_period_hours
+
         personas, active_persona = _normalize_persona_profiles(persona_conf, data_dir)
         persona_conf["profiles"] = [profile.to_config_dict() for profile in personas]
         persona_conf["active_persona_id"] = active_persona.id
         persona_conf["persona_name"] = active_persona.name
         persona_conf["persona_base_prompt"] = active_persona.base_prompt
         persona_conf["persona_ref_image"] = list(active_persona.ref_images)
+
+        # 根据当前时段选择参考图
+        period_refs = active_persona.time_period_refs.get(active_time_period, [])
+        if period_refs:
+            persona_time_period_refs = period_refs
+        else:
+            persona_time_period_refs = list(active_persona.ref_images)
+        persona_conf["persona_time_period_refs"] = list(persona_time_period_refs)
 
         chains = {
             "text2img": _parse_chain(router_conf.get("chain_text2img", "node_1")),
@@ -233,6 +296,7 @@ class PluginConfig:
             video_providers=video_providers,
             chains=chains,
             presets=presets_dict,
+            presets_hidden=presets_hidden,
             enable_optimizer=_to_bool(opt_conf.get("enable_optimizer", True)),
             optimizer_model=optimizer_model or "gpt-4o-mini",
             optimizer_timeout=_to_float(opt_conf.get("optimizer_timeout", 15.0), 15.0, minimum=1.0),
@@ -240,7 +304,7 @@ class PluginConfig:
             persona_name=active_persona.name,
             persona_base_prompt=active_persona.base_prompt,
             persona_ref_image=active_persona.ref_images[0] if active_persona.ref_images else "",
-            persona_ref_images=list(active_persona.ref_images),
+            persona_ref_images=list(persona_time_period_refs),
             active_persona_id=active_persona.id,
             personas=personas,
             usable_users=usable_users,
@@ -264,8 +328,12 @@ class PluginConfig:
             draw_error_message=draw_error_message,
             selfie_error_message=selfie_error_message,
             verbose_report=_to_bool(config_dict.get("verbose_report", False)),
+            hide_preset_prompt=_to_bool(config_dict.get("hide_preset_prompt", True)),
             show_generation_time=_to_bool(config_dict.get("show_generation_time", False)),
             show_request_model=_to_bool(config_dict.get("show_request_model", False)),
+            active_time_period=active_time_period,
+            persona_time_period_refs={k: list(v) for k, v in active_persona.time_period_refs.items()},
+            time_period_hours=time_period_hours,
         )
 
     def get_provider(self, provider_id: str) -> Optional[ProviderConfig]:
@@ -285,6 +353,30 @@ class PluginConfig:
             if persona.id == persona_id:
                 return persona
         return None
+
+    def detect_time_period(self, hour: int = None) -> str:
+        """根据当前小时检测属于哪个时段。返回 'morning' / 'day' / 'evening'。"""
+        if hour is None:
+            import datetime
+            hour = datetime.datetime.now().hour
+        for period_key in ("morning", "day", "evening"):
+            p = self.time_period_hours.get(period_key, {})
+            start = p.get("start", 6)
+            end = p.get("end", 12)
+            if end > start:
+                # 同一天内：start <= hour < end
+                if start <= hour < end:
+                    return period_key
+            else:
+                # 跨午夜：hour >= start 或 hour < end
+                if hour >= start or hour < end:
+                    return period_key
+        return "day"
+
+    @property
+    def time_period_label(self) -> str:
+        labels = {"morning": "早上", "day": "白天", "evening": "晚上"}
+        return labels.get(self.active_time_period, "白天")
 
 
 def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -384,6 +476,27 @@ def _build_provider_config(raw_provider: Any, is_video: bool) -> ProviderConfig:
         model=model,
         timeout=_to_float(raw_provider.get("timeout", raw_provider.get("超时时间(秒)", default_timeout)), default_timeout, 1.0),
         available_models=available_models,
+        image_resolution_mode=str(
+            raw_provider.get(
+                "image_resolution_mode",
+                raw_provider.get("resolution_mode", raw_provider.get("分辨率模式", "official")),
+            )
+            or "official"
+        ).strip(),
+        image_size=str(
+            raw_provider.get(
+                "image_size",
+                raw_provider.get("imageSize", raw_provider.get("size", raw_provider.get("默认分辨率", ""))),
+            )
+            or ""
+        ).strip(),
+        aspect_ratio=str(
+            raw_provider.get(
+                "aspect_ratio",
+                raw_provider.get("aspectRatio", raw_provider.get("默认宽高比", raw_provider.get("默认比例", ""))),
+            )
+            or ""
+        ).strip(),
     )
 
 
@@ -489,19 +602,34 @@ def _normalize_persona_profiles(persona_conf: Dict[str, Any], data_dir: str) -> 
         )
         processed_images = _process_persona_images(raw_images, refs_dir, cleanup=False)
         active_refs.extend(processed_images)
+
+        # 解析时段参考图
+        raw_period_refs = raw_profile.get("time_period_refs", {})
+        if not isinstance(raw_period_refs, dict):
+            raw_period_refs = {}
+        time_period_refs: Dict[str, List[str]] = {"morning": [], "day": [], "evening": []}
+        for period_key in ("morning", "day", "evening"):
+            period_raw = raw_period_refs.get(period_key, [])
+            period_processed = _process_persona_images(period_raw, refs_dir, cleanup=False)
+            time_period_refs[period_key] = period_processed
+            active_refs.extend(period_processed)
+
         profiles.append(
             PersonaProfile(
                 id=profile_id,
                 name=name,
                 base_prompt=base_prompt,
                 ref_images=processed_images,
+                time_period_refs=time_period_refs,
             )
         )
 
     if not profiles:
         profiles.append(PersonaProfile(id="default", name="默认助理", base_prompt="", ref_images=[]))
 
-    _cleanup_unused_persona_refs(refs_dir, active_refs)
+    # Do not prune persona_refs while normalizing config. A stale preview URL or
+    # temporarily missing path can make active_refs incomplete and delete valid
+    # persona images on the next refresh.
 
     active_id = str(persona_conf.get("active_persona_id", "")).strip()
     active_persona = next(
@@ -545,7 +673,8 @@ def _process_persona_images(raw_images: Any, refs_dir: str, cleanup: bool = True
                 processed_images.append(saved_path)
         else:
             img_ref = _resolve_plugin_file_ref(img_ref, plugin_data_dir)
-            processed_images.append(img_ref)
+            if _is_remote_image_ref(img_ref) or os.path.exists(img_ref):
+                processed_images.append(img_ref)
 
     if cleanup:
         _cleanup_unused_persona_refs(refs_dir, processed_images)
@@ -568,7 +697,12 @@ def _resolve_plugin_file_ref(image_ref: str, plugin_data_dir: str) -> str:
 
 
 def _is_page_preview_ref(image_ref: str) -> bool:
-    return "astrbot_plugin_omnidraw/get_image" in str(image_ref)
+    ref = str(image_ref)
+    return f"{PLUGIN_NAME}/get_image" in ref or "astrbot_plugin_omnidraw_tuo/get_image" in ref
+
+
+def _is_remote_image_ref(image_ref: str) -> bool:
+    return str(image_ref or "").lower().startswith(("http://", "https://"))
 
 
 def _save_data_url_image(data_url: str, refs_dir: str, idx: int) -> str:

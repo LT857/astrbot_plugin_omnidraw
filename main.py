@@ -62,7 +62,7 @@ from .core.video_manager import VideoManager
 from .models import PLUGIN_AUTHOR, PLUGIN_NAME, PLUGIN_VERSION, PluginConfig
 from .utils import handle_errors, save_image_bytes, split_data_url
 
-PAGE_PREVIEW_IMAGE_BYTES = 80 * 1024 * 1024
+PAGE_PREVIEW_IMAGE_BYTES = 0  # 本地参考图全部按需预览，避免配置页 JSON 携带图片数据
 NATIVE_ACTIVE_PERSONA_FILE_PREFIX = "files/persona_config/persona_ref_image/"
 CACHE_DIR_NAMES = ("temp_images", "user_refs")
 CACHE_IMAGE_EXTENSIONS = frozenset({
@@ -93,6 +93,7 @@ CONFIG_KEYS = {
     "cache_config",
     "reply_config",
     "verbose_report",
+    "hide_preset_prompt",
     "show_generation_time",
     "show_request_model",
 }
@@ -159,6 +160,12 @@ class OmniDrawPlugin(Star):
             self.get_image_handler,
             ["GET"],
             "获取万象画卷本地参考图预览",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/get_image_data",
+            self.get_image_data_handler,
+            ["GET", "POST"],
+            "获取万象画卷本地参考图 Data URL 预览",
         )
 
     def _resolve_data_dir(self) -> str:
@@ -307,7 +314,11 @@ class OmniDrawPlugin(Star):
         upload_refs = self._as_config_list(
             persona_config.get("persona_ref_image") or persona_config.get("persona_ref_images")
         )
-        if not any(self._is_native_file_ref(ref) for ref in upload_refs):
+        native_upload_refs = [ref for ref in upload_refs if self._is_native_file_ref(ref)]
+        if not native_upload_refs:
+            ref_status = self._native_active_persona_ref_status(persona_config)
+            persona_config["effective_ref_status"] = ref_status["status"]
+            persona_config["effective_ref_source"] = ref_status["source"]
             return
 
         profiles = persona_config.get("profiles")
@@ -322,7 +333,15 @@ class OmniDrawPlugin(Star):
 
         active_profile = self._find_active_persona_profile(persona_config, profiles)
         if active_profile is not None:
-            active_profile["persona_ref_image"] = upload_refs
+            existing_refs = [
+                ref for ref in self._as_config_list(active_profile.get("persona_ref_image"))
+                if not self._is_native_file_ref(ref)
+            ]
+            active_profile["persona_ref_image"] = self._unique_refs(existing_refs + native_upload_refs)
+
+        ref_status = self._native_active_persona_ref_status(persona_config)
+        persona_config["effective_ref_status"] = ref_status["status"]
+        persona_config["effective_ref_source"] = ref_status["source"]
 
     def _as_config_list(self, value: Any) -> List[Any]:
         if isinstance(value, list):
@@ -344,6 +363,17 @@ class OmniDrawPlugin(Star):
 
     def _is_native_file_ref(self, image_ref: Any) -> bool:
         return str(image_ref or "").replace("\\", "/").lstrip("/").startswith("files/")
+
+    def _unique_refs(self, refs: Iterable[Any]) -> List[Any]:
+        unique = []
+        seen = set()
+        for ref in refs:
+            ref_str = str(ref or "")
+            if not ref_str or ref_str in seen:
+                continue
+            seen.add(ref_str)
+            unique.append(ref)
+        return unique
 
     def _native_file_ref_for_config(self, image_ref: Any) -> str:
         if not image_ref:
@@ -367,6 +397,15 @@ class OmniDrawPlugin(Star):
             return rel_ref
         return ""
 
+    def _native_display_ref_for_config(self, image_ref: Any) -> str:
+        native_ref = self._native_file_ref_for_config(image_ref)
+        if native_ref:
+            return native_ref
+        ref_str = str(image_ref or "").strip()
+        if not ref_str or self._is_page_image_preview_ref(ref_str):
+            return ""
+        return ref_str
+
     def _native_active_persona_file_refs(self, persona_config: Dict[str, Any]) -> List[str]:
         profiles = persona_config.get("profiles")
         if not isinstance(profiles, list):
@@ -375,11 +414,41 @@ class OmniDrawPlugin(Star):
         if not active_profile:
             return []
         refs = []
+        # 原生 file 字段只保留 AstrBot 自己上传得到的 files/... 引用。
+        # Pages 管理的人设图保存在 profiles/time_period_refs，避免原生配置页加载大量图片导致后台变慢。
         for ref in self._as_config_list(active_profile.get("persona_ref_image")):
             native_ref = self._native_file_ref_for_config(ref)
             if native_ref and native_ref not in refs:
                 refs.append(native_ref)
+        active_period = str(persona_config.get("active_time_period", "day")).strip()
+        time_refs = active_profile.get("time_period_refs", {})
+        if isinstance(time_refs, dict):
+            for period_key in (active_period, "day", "morning", "evening"):
+                for ref in self._as_config_list(time_refs.get(period_key, [])):
+                    native_ref = self._native_file_ref_for_config(ref)
+                    if native_ref and native_ref not in refs:
+                        refs.append(native_ref)
         return refs
+
+    def _native_active_persona_ref_status(self, persona_config: Dict[str, Any]) -> Dict[str, str]:
+        profiles = persona_config.get("profiles")
+        if not isinstance(profiles, list):
+            return {"status": "0 张", "source": "暂无参考图"}
+        active_profile = self._find_active_persona_profile(persona_config, profiles)
+        if not active_profile:
+            return {"status": "0 张", "source": "暂无参考图"}
+
+        active_period = str(persona_config.get("active_time_period", "day")).strip()
+        period_labels = {"morning": "早上", "day": "白天", "evening": "晚上"}
+        time_refs = active_profile.get("time_period_refs", {})
+        period_refs = self._as_config_list(time_refs.get(active_period, [])) if isinstance(time_refs, dict) else []
+        shared_refs = self._as_config_list(active_profile.get("persona_ref_image"))
+        refs = period_refs if period_refs else shared_refs
+        source = "时段专用" if period_refs else ("共享兜底" if shared_refs else "暂无参考图")
+        return {
+            "status": f"{len(refs)} 张（{period_labels.get(active_period, active_period)}）",
+            "source": source,
+        }
 
     def _config_for_native_page(self) -> Dict[str, Any]:
         native_config = copy.deepcopy(self.raw_config)
@@ -401,7 +470,11 @@ class OmniDrawPlugin(Star):
         persona_config = native_config.get("persona_config")
         if isinstance(persona_config, dict):
             persona_config["profiles"] = mark_template_items(persona_config.get("profiles", []), "persona")
+            ref_status = self._native_active_persona_ref_status(persona_config)
             persona_config["persona_ref_image"] = self._native_active_persona_file_refs(persona_config)
+            persona_config["effective_ref_status"] = ref_status["status"]
+            persona_config["effective_ref_source"] = ref_status["source"]
+            persona_config["persona_time_period_refs"] = []
         return native_config
 
     def _has_config_payload(self, config: Dict[str, Any]) -> bool:
@@ -500,9 +573,29 @@ class OmniDrawPlugin(Star):
                 if value not in (None, "", default):
                     return True
 
+        def has_period_refs(value: Any) -> bool:
+            if not isinstance(value, dict):
+                return False
+            for period_key in ("morning", "day", "evening"):
+                if self._as_config_list(value.get(period_key, [])):
+                    return True
+            return False
+
         persona_config = config.get("persona_config")
         if isinstance(persona_config, dict):
             if persona_config.get("active_persona_id") not in (None, "", "default"):
+                return True
+            if persona_config.get("active_time_period") not in (None, "", "day"):
+                return True
+            if has_period_refs(persona_config.get("time_period_refs", {})):
+                return True
+            default_hours = {
+                "morning": {"start": 6, "end": 9},
+                "day": {"start": 9, "end": 18},
+                "evening": {"start": 18, "end": 6},
+            }
+            period_hours = persona_config.get("time_period_hours")
+            if isinstance(period_hours, dict) and period_hours != default_hours:
                 return True
             profiles = persona_config.get("profiles")
             if isinstance(profiles, list) and profiles:
@@ -518,6 +611,8 @@ class OmniDrawPlugin(Star):
                         return True
                     if profile.get("persona_ref_image"):
                         return True
+                    if has_period_refs(profile.get("time_period_refs", {})):
+                        return True
             if str(persona_config.get("persona_name", "")).strip() not in ("", "默认助理"):
                 return True
             if str(persona_config.get("persona_base_prompt", "")).strip():
@@ -532,12 +627,11 @@ class OmniDrawPlugin(Star):
         persisted_config = self._clean_runtime_config(self._load_json_file(self.config_path))
         persisted_has_payload = self._has_config_payload(persisted_config)
 
-        if native_has_payload:
-            if not persisted_has_payload or self._native_config_mtime >= self._persist_config_mtime:
-                return native_config
-            return persisted_config
+        # 优先使用本地持久化配置（完整无过滤），原生配置仅作为后备
         if persisted_has_payload:
             return persisted_config
+        if native_has_payload:
+            return native_config
         if native_config:
             return native_config
         if os.path.exists(self.config_path):
@@ -589,6 +683,54 @@ class OmniDrawPlugin(Star):
         except Exception as exc:
             logger.warning(f"[OmniDraw] AstrBot 主配置同步失败，已保留本地持久化配置: {exc}")
 
+    def _merge_page_managed_persona_data(self, native_config: Dict[str, Any]) -> None:
+        native_persona = native_config.setdefault("persona_config", {})
+        saved_persona = self.raw_config.get("persona_config", {})
+        if not isinstance(native_persona, dict) or not isinstance(saved_persona, dict):
+            return
+
+        for key in ("time_period_refs", "time_period_hours"):
+            if key not in native_persona and key in saved_persona:
+                native_persona[key] = copy.deepcopy(saved_persona[key])
+
+        saved_profiles = saved_persona.get("profiles")
+        if not isinstance(saved_profiles, list) or not saved_profiles:
+            return
+
+        native_profiles = native_persona.get("profiles")
+        if not isinstance(native_profiles, list) or not native_profiles:
+            native_persona["profiles"] = copy.deepcopy(saved_profiles)
+            return
+
+        saved_by_id = {
+            str(profile.get("id") or "").strip().lower(): profile
+            for profile in saved_profiles
+            if isinstance(profile, dict) and str(profile.get("id") or "").strip()
+        }
+        for index, profile in enumerate(native_profiles):
+            if not isinstance(profile, dict):
+                continue
+            profile_id = str(profile.get("id") or "").strip().lower()
+            saved_profile = saved_by_id.get(profile_id)
+            if saved_profile is None and index < len(saved_profiles) and isinstance(saved_profiles[index], dict):
+                saved_profile = saved_profiles[index]
+            if not isinstance(saved_profile, dict):
+                continue
+
+            saved_period_refs = saved_profile.get("time_period_refs")
+            if not isinstance(saved_period_refs, dict):
+                continue
+            period_refs = profile.get("time_period_refs")
+            if not isinstance(period_refs, dict):
+                period_refs = {}
+                profile["time_period_refs"] = period_refs
+            for period_key in ("morning", "day", "evening"):
+                if self._as_config_list(period_refs.get(period_key, [])):
+                    continue
+                saved_refs = self._as_config_list(saved_period_refs.get(period_key, []))
+                if saved_refs:
+                    period_refs[period_key] = copy.deepcopy(saved_refs)
+
     def _refresh_from_native_config_if_changed(self) -> None:
         if not self._native_config_path:
             return
@@ -602,8 +744,9 @@ class OmniDrawPlugin(Star):
                 self._native_config_mtime = current_mtime
                 self._native_config_signature = current_signature
                 return
+            # 保留 Pages 管理的时段数据，不被原生配置覆盖
+            self._merge_page_managed_persona_data(native_config)
             self._apply_runtime_config(native_config)
-            self._persist_config()
             self._native_config_mtime = current_mtime
             self._native_config_signature = current_signature
             if self._native_config is not None:
@@ -613,7 +756,8 @@ class OmniDrawPlugin(Star):
 
     async def get_config_handler(self):
         self._refresh_from_native_config_if_changed()
-        return jsonify(self._config_for_page())
+        page_config = await asyncio.to_thread(self._config_for_page)
+        return jsonify(page_config)
 
     async def get_usage_stats_handler(self):
         self._refresh_from_native_config_if_changed()
@@ -642,6 +786,17 @@ class OmniDrawPlugin(Star):
                     raw_profile_images = [raw_profile_images] if raw_profile_images else []
                 profile["persona_ref_image"] = self._image_refs_for_page(raw_profile_images)
 
+                # 处理时段参考图
+                raw_period_refs = profile.get("time_period_refs", {})
+                if not isinstance(raw_period_refs, dict):
+                    raw_period_refs = {}
+                for period_key in ("morning", "day", "evening"):
+                    period_raw = raw_period_refs.get(period_key, [])
+                    if not isinstance(period_raw, list):
+                        period_raw = [period_raw] if period_raw else []
+                    raw_period_refs[period_key] = self._image_refs_for_page(period_raw)
+                profile["time_period_refs"] = raw_period_refs
+
         raw_images = persona_config.get("persona_ref_image", [])
         if not isinstance(raw_images, list):
             raw_images = [raw_images] if raw_images else []
@@ -659,7 +814,7 @@ class OmniDrawPlugin(Star):
         return refs
 
     def _image_ref_for_page(self, image_ref: str) -> str:
-        image_ref = str(image_ref)
+        image_ref = self._resolve_config_image_ref_for_page(str(image_ref))
         resolved_preview = self._resolve_page_image_ref(image_ref)
         if resolved_preview:
             image_ref = resolved_preview
@@ -669,7 +824,7 @@ class OmniDrawPlugin(Star):
         if image_ref.startswith(("http", "data:image")):
             return image_ref
         if not os.path.exists(image_ref):
-            return image_ref
+            return "" if self._is_local_image_ref(image_ref) else image_ref
         try:
             if os.path.getsize(image_ref) > PAGE_PREVIEW_IMAGE_BYTES:
                 return self._local_image_preview_url(image_ref)
@@ -679,6 +834,32 @@ class OmniDrawPlugin(Star):
             return f"data:{mime_type};base64,{encoded}"
         except OSError:
             return image_ref
+
+    def _resolve_config_image_ref_for_page(self, image_ref: str) -> str:
+        normalized = str(image_ref or "").replace("\\", "/").lstrip("/")
+        if not normalized.startswith("files/"):
+            return str(image_ref or "")
+
+        abs_path = os.path.abspath(os.path.join(self.data_dir, *normalized.split("/")))
+        try:
+            common = os.path.commonpath([os.path.abspath(self.data_dir), abs_path])
+        except ValueError:
+            return str(image_ref or "")
+        return abs_path if common == os.path.abspath(self.data_dir) else str(image_ref or "")
+
+    def _is_local_image_ref(self, image_ref: str) -> bool:
+        ref = str(image_ref or "").strip()
+        if not ref:
+            return False
+        lowered = ref.lower()
+        if lowered.startswith(("http://", "https://", "data:image")):
+            return False
+        return (
+            os.path.isabs(ref)
+            or "\\" in ref
+            or lowered.startswith(("files/", "./", "../"))
+            or bool(re.match(r"^[a-z]:[\\/]", ref, re.IGNORECASE))
+        )
 
     def _local_image_preview_url(self, image_ref: str) -> str:
         abs_path = os.path.abspath(image_ref)
@@ -732,12 +913,22 @@ class OmniDrawPlugin(Star):
                 refs.append(ref_str)
             return refs
 
+        def normalize_period_refs(value: Any) -> Dict[str, List[str]]:
+            raw_period_refs = value if isinstance(value, dict) else {}
+            return {
+                period_key: normalize_refs(raw_period_refs.get(period_key, []))
+                for period_key in ("morning", "day", "evening")
+            }
+
         persona_config["persona_ref_image"] = normalize_refs(persona_config.get("persona_ref_image", []))
+        if isinstance(persona_config.get("time_period_refs"), dict):
+            persona_config["time_period_refs"] = normalize_period_refs(persona_config.get("time_period_refs", {}))
         profiles = persona_config.get("profiles", [])
         if isinstance(profiles, list):
             for profile in profiles:
                 if isinstance(profile, dict):
                     profile["persona_ref_image"] = normalize_refs(profile.get("persona_ref_image", []))
+                    profile["time_period_refs"] = normalize_period_refs(profile.get("time_period_refs", {}))
 
     async def get_image_handler(self):
         token = str(request.args.get("token", "")).strip()
@@ -747,6 +938,21 @@ class OmniDrawPlugin(Star):
 
         mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
         return await send_file(image_path, mimetype=mime_type)
+
+    async def get_image_data_handler(self):
+        payload = await request.get_json(silent=True) if request.method == "POST" else {}
+        token = str((payload or {}).get("token") or request.args.get("token", "")).strip()
+        image_path = self._page_image_tokens.get(token)
+        if not image_path or not os.path.exists(image_path):
+            return jsonify({"success": False, "message": "参考图预览已失效，请刷新配置页。"}), 404
+
+        try:
+            mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
+            with open(image_path, "rb") as file:
+                encoded = base64.b64encode(file.read()).decode("utf-8")
+        except OSError:
+            return jsonify({"success": False, "message": "参考图读取失败，请重新上传。"}), 404
+        return jsonify({"success": True, "image": f"data:{mime_type};base64,{encoded}"})
 
     async def save_config_handler(self):
         new_config = await request.get_json(silent=True)
@@ -1613,6 +1819,40 @@ class OmniDrawPlugin(Star):
         persona_conf["active_persona_id"] = persona_id
         self._apply_runtime_config(self.raw_config)
 
+    def _set_active_time_period(self, period: str) -> str:
+        """设置当前时段并返回时段中文名。"""
+        period_labels = {"morning": "早上", "day": "白天", "evening": "晚上"}
+        persona_conf = self.raw_config.setdefault("persona_config", {})
+        persona_conf["active_time_period"] = period
+        self._apply_runtime_config(self.raw_config)
+        return period_labels.get(period, period)
+
+    def _current_persona_reference_info(self, refresh_period: bool = True) -> Dict[str, Any]:
+        period_labels = {"morning": "早上", "day": "白天", "evening": "晚上"}
+        period = self.plugin_config.detect_time_period()
+        if refresh_period and period != self.plugin_config.active_time_period:
+            self._set_active_time_period(period)
+        if refresh_period:
+            period = self.plugin_config.active_time_period
+        active_persona = self.plugin_config.get_persona(self.plugin_config.active_persona_id)
+        if active_persona:
+            period_refs = list(active_persona.time_period_refs.get(period, []))
+            shared_refs = list(active_persona.ref_images)
+            persona_name = active_persona.name
+        else:
+            period_refs = list(self.plugin_config.persona_time_period_refs.get(period, []))
+            shared_refs = list(self.plugin_config.persona_ref_images)
+            persona_name = self.plugin_config.persona_name
+
+        refs = period_refs if period_refs else shared_refs
+        return {
+            "period": period,
+            "period_label": period_labels.get(period, "白天"),
+            "persona_name": persona_name,
+            "refs": refs,
+            "source_label": "时段专用" if period_refs else ("共享兜底" if shared_refs else "暂无参考图"),
+        }
+
     def _parse_extra_params(self, extra_params: str) -> Dict[str, Any]:
         if not extra_params:
             return {}
@@ -1636,13 +1876,17 @@ class OmniDrawPlugin(Star):
     def _format_pending_message(self, template: str, default: str, **values: Any) -> str:
         return self._format_reply_message(template, default, **values)
 
-    def _preset_items(self) -> List[tuple]:
+    def _preset_items(self, include_hidden: bool = False) -> List[tuple]:
         presets = getattr(self.plugin_config, "presets", {}) or {}
-        return [
+        hidden = set(getattr(self.plugin_config, "presets_hidden", []) or [])
+        items = [
             (str(name).strip(), str(prompt or "").strip())
             for name, prompt in presets.items()
             if str(name).strip()
         ]
+        if not include_hidden:
+            items = [(name, prompt) for name, prompt in items if name not in hidden]
+        return items
 
     def _normalize_preset_selector(self, selector: str) -> str:
         selector = str(selector or "").strip()
@@ -1661,13 +1905,13 @@ class OmniDrawPlugin(Star):
             return selector
 
         selector_lower = selector.lower()
-        for name, _ in self._preset_items():
+        for name, _ in self._preset_items(include_hidden=True):
             if name.lower() == selector_lower:
                 return name
         return ""
 
     def _build_preset_list_message(self) -> str:
-        preset_names = [name for name, _ in self._preset_items()]
+        preset_names = [name for name, _ in self._preset_items(include_hidden=False)]
         if not preset_names:
             return f"{MessageEmoji.INFO} 当前没有配置极速宏预设。"
 
@@ -1697,6 +1941,35 @@ class OmniDrawPlugin(Star):
         match = re.match(pattern, str(text or ""), flags=re.S)
         return (match.group("payload") or "").strip() if match else ""
 
+    def _hide_preset_prompt(self) -> bool:
+        return bool(getattr(self.plugin_config, "hide_preset_prompt", True))
+
+    def _preset_prompt_for_reply(self, preset_prompt: str) -> str:
+        return "已隐藏" if self._hide_preset_prompt() else str(preset_prompt or "")
+
+    def _build_preset_verbose_report(self, preset_prompt: str, ref_count: int) -> str:
+        lines = []
+        if not self._hide_preset_prompt():
+            lines.append(f"📝 宏对应提示词: {preset_prompt}")
+        lines.append(f"🖼️ 实际参考图：{ref_count} 张")
+        return "\n".join(lines)
+
+    def _match_preset_trigger(self, text: str) -> str:
+        presets = getattr(self.plugin_config, "presets", {}) or {}
+        stripped = str(text or "").strip()
+        if not stripped or not presets:
+            return ""
+
+        prefixed = re.match(r"^\s*[/!！.]([^\s]+)", stripped, flags=re.S)
+        if prefixed:
+            return self._find_preset_name(prefixed.group(1).strip())
+
+        preset_names = [name for name, _ in self._preset_items(include_hidden=True)]
+        for name in sorted(preset_names, key=len, reverse=True):
+            if re.match(rf"^{re.escape(name)}(?:\s|$)", stripped, flags=re.S):
+                return name
+        return ""
+
     def _parse_preset_add_payload(self, payload: str) -> tuple:
         payload = str(payload or "").strip()
         if not payload:
@@ -1716,8 +1989,15 @@ class OmniDrawPlugin(Star):
             return "预设名不需要包含指令前缀。"
         return ""
 
-    def _replace_presets(self, presets: Dict[str, str]) -> None:
-        normalized = [f"{name}:{prompt}" for name, prompt in presets.items()]
+    def _replace_presets(self, presets: Dict[str, str], hidden: Optional[set] = None) -> None:
+        if hidden is None:
+            hidden = set(getattr(self.plugin_config, "presets_hidden", []) or [])
+        normalized = []
+        for name, prompt in presets.items():
+            if name in hidden:
+                normalized.append(f"#{name}:{prompt}")
+            else:
+                normalized.append(f"{name}:{prompt}")
         with self._config_lock:
             self.raw_config["presets"] = normalized
             self._apply_runtime_config(self.raw_config)
@@ -1725,19 +2005,26 @@ class OmniDrawPlugin(Star):
             self._safe_update_context_config()
 
     def _upsert_preset(self, preset_name: str, preset_prompt: str) -> bool:
-        presets = dict(self._preset_items())
+        current_hidden = set(getattr(self.plugin_config, "presets_hidden", []) or [])
+        presets = dict(self._preset_items(include_hidden=True))
         existed = preset_name in presets
         presets[preset_name] = preset_prompt
-        self._replace_presets(presets)
+        if existed:
+            # preserve existing hidden state
+            self._replace_presets(presets, current_hidden)
+        else:
+            self._replace_presets(presets, current_hidden)
         return existed
 
     def _delete_preset(self, selector: str) -> str:
         preset_name = self._find_preset_name(selector)
         if not preset_name:
             return ""
-        presets = dict(self._preset_items())
+        current_hidden = set(getattr(self.plugin_config, "presets_hidden", []) or [])
+        presets = dict(self._preset_items(include_hidden=True))
         presets.pop(preset_name, None)
-        self._replace_presets(presets)
+        current_hidden.discard(preset_name)
+        self._replace_presets(presets, current_hidden)
         return preset_name
 
     def _build_command_error_message(self, func_name: str, exc: Exception, error_kind: str = "exception") -> Optional[str]:
@@ -1798,6 +2085,10 @@ class OmniDrawPlugin(Star):
             "/视频 [提示词] [--参数 值]\n"
             "/人设\n"
             "/切换人设 [序号/ID/名称]\n"
+            "/时段 [早上/白天/晚上]\n"
+            "/时段设置 [早上/白天/晚上] [开始] [结束]\n"
+            "/查看参考图\n"
+            "/查看全部参考图\n"
             "/切换链路 [画图/自拍/视频/副脑] [节点ID]\n"
             "/切换模型 [画图/自拍/视频] [序号或名称]\n"
             "/签到\n"
@@ -1808,7 +2099,10 @@ class OmniDrawPlugin(Star):
             "/万象帮助\n\n"
         )
         if self.plugin_config.presets:
-            msg += "✨ 预设:\n" + "\n".join([f"/{preset}" for preset in self.plugin_config.presets.keys()])
+            hidden = set(getattr(self.plugin_config, "presets_hidden", []) or [])
+            visible = [preset for preset in self.plugin_config.presets.keys() if preset not in hidden]
+            if visible:
+                msg += "✨ 预设（可直接发送名称，或使用 /名称）:\n" + "\n".join(visible)
         yield event.plain_result(msg)
 
     @filter.command("查看预设")
@@ -2005,6 +2299,204 @@ class OmniDrawPlugin(Star):
             f"自拍将使用该人设的 {len(self.plugin_config.persona_ref_images)} 张参考图。"
         )
 
+    @filter.command("时段")
+    @handle_errors
+    async def cmd_time_period(
+        self,
+        event: AstrMessageEvent,
+        p1: str = "",
+        p2: str = "",
+        p3: str = "",
+    ) -> AsyncGenerator[Any, None]:
+        permission_error = self._permission_denied_message(event)
+        if permission_error:
+            yield event.plain_result(permission_error)
+            return
+
+        period_map = {
+            "早上": "morning", "morning": "morning",
+            "白天": "day", "day": "day",
+            "晚上": "evening", "evening": "evening",
+        }
+        fallback = " ".join(str(item) for item in [p1, p2, p3] if item).strip()
+        selector = self._extract_command_message(event, "时段", fallback)
+        selector_lower = str(selector or "").strip().lower()
+
+        if not selector:
+            period_labels = {"morning": "早上", "day": "白天", "evening": "晚上"}
+            current_label = period_labels.get(self.plugin_config.active_time_period, "白天")
+            auto_period = self.plugin_config.detect_time_period()
+            auto_label = period_labels.get(auto_period, "白天")
+            hours = self.plugin_config.time_period_hours
+            msg = f"🕐 当前时段: {current_label}"
+            if auto_period != self.plugin_config.active_time_period:
+                msg += f"（系统时间属于「{auto_label}」）"
+            msg += "\n\n时段范围:\n"
+            for pk in ("morning", "day", "evening"):
+                p = hours.get(pk, {})
+                marker = "👉" if pk == auto_period else "  "
+                msg += f"{marker} {period_labels.get(pk, pk)}: {p.get('start', 0)}:00 ~ {p.get('end', 0)}:00"
+                refs = self.plugin_config.persona_time_period_refs.get(pk, [])
+                msg += f" · {len(refs)} 张图\n"
+            msg += "\n用法: /时段 早上|白天|晚上     /时段设置 查看/修改时间"
+            yield event.plain_result(msg)
+            return
+
+        period_key = period_map.get(selector, period_map.get(selector_lower, ""))
+        if not period_key:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 未知时段: {selector}\n可用: 早上 / 白天 / 晚上")
+            return
+
+        label = self._set_active_time_period(period_key)
+        self._persist_config()
+        self._safe_update_context_config()
+        ref_count = len(self.plugin_config.persona_ref_images)
+        yield event.plain_result(
+            f"{MessageEmoji.SUCCESS} 已切换至「{label}」时段，"
+            f"当前人设「{self.plugin_config.persona_name}」该时段有 {ref_count} 张参考图。"
+        )
+
+    @filter.command("时段设置")
+    @handle_errors
+    async def cmd_time_period_config(
+        self,
+        event: AstrMessageEvent,
+        p1: str = "",
+        p2: str = "",
+        p3: str = "",
+        p4: str = "",
+    ) -> AsyncGenerator[Any, None]:
+        """设置各时段的时间范围。用法: /时段设置 [早上/白天/晚上] [开始时间] [结束时间]"""
+        permission_error = self._permission_denied_message(event)
+        if permission_error:
+            yield event.plain_result(permission_error)
+            return
+
+        period_map = {
+            "早上": "morning", "morning": "morning",
+            "白天": "day", "day": "day",
+            "晚上": "evening", "evening": "evening",
+        }
+        fallback = " ".join(str(item) for item in [p1, p2, p3, p4] if item).strip()
+        selector = self._extract_command_message(event, "时段设置", fallback)
+
+        if not selector:
+            # 显示当前时段设置
+            hours = self.plugin_config.time_period_hours
+            period_labels = {"morning": "早上", "day": "白天", "evening": "晚上"}
+            auto_period = self.plugin_config.detect_time_period()
+            auto_label = period_labels.get(auto_period, "白天")
+            msg = "⏰ 当前时段范围:\n"
+            for pk in ("morning", "day", "evening"):
+                p = hours.get(pk, {})
+                msg += f"  {period_labels.get(pk, pk)}: {p.get('start', 0)}:00 ~ {p.get('end', 0)}:00\n"
+            msg += f"\n🕐 当前系统时间属于「{auto_label}」时段\n"
+            msg += "用法: /时段设置 早上 6 9"
+            yield event.plain_result(msg)
+            return
+
+        parts = str(selector).strip().split()
+        if len(parts) < 3:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 参数不足。用法: /时段设置 早上 6 9")
+            return
+
+        period_name = parts[0]
+        period_key = period_map.get(period_name, period_map.get(period_name.lower(), ""))
+        if not period_key:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 未知时段: {period_name}\n可用: 早上 / 白天 / 晚上")
+            return
+
+        try:
+            start_h = int(parts[1])
+            end_h = int(parts[2])
+        except ValueError:
+            yield event.plain_result(f"{MessageEmoji.WARNING} 时间必须是整数（0-23），例如: /时段设置 早上 6 9")
+            return
+
+        if not (0 <= start_h <= 23 and 0 <= end_h <= 23):
+            yield event.plain_result(f"{MessageEmoji.WARNING} 时间范围必须是 0-23")
+            return
+
+        # 更新配置
+        persona_conf = self.raw_config.setdefault("persona_config", {})
+        period_hours = persona_conf.setdefault("time_period_hours", {"morning": {}, "day": {}, "evening": {}})
+        period_hours[period_key] = {"start": start_h, "end": end_h}
+        self._apply_runtime_config(self.raw_config)
+        self._persist_config()
+        self._safe_update_context_config()
+
+        yield event.plain_result(
+            f"{MessageEmoji.SUCCESS} 已设置 {parts[0]} 时段为 {start_h}:00 ~ {end_h}:00"
+        )
+
+    @filter.command("查看参考图")
+    @handle_errors
+    async def cmd_view_ref_images(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
+        permission_error = self._permission_denied_message(event)
+        if permission_error:
+            yield event.plain_result(permission_error)
+            return
+
+        ref_info = self._current_persona_reference_info()
+        refs = ref_info["refs"]
+
+        if not refs:
+            yield event.plain_result(
+                f"🎭 当前人设: {ref_info['persona_name']}\n"
+                f"🕐 {ref_info['period_label']} 时段暂无参考图\n"
+                "发送 /查看全部参考图 查看各时段全部参考图"
+            )
+            return
+
+        yield event.plain_result(
+            f"🎭 当前人设: {ref_info['persona_name']}\n"
+            f"🕐 {ref_info['period_label']} 时段 · {len(refs)} 张参考图\n"
+            f"📌 来源: {ref_info['source_label']}"
+        )
+        for ref in refs:
+            try:
+                if os.path.isfile(ref):
+                    yield event.chain_result([Image.fromFileSystem(os.path.abspath(ref))])
+            except Exception:
+                pass
+
+    @filter.command("查看全部参考图")
+    @handle_errors
+    async def cmd_view_all_ref_images(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
+        permission_error = self._permission_denied_message(event)
+        if permission_error:
+            yield event.plain_result(permission_error)
+            return
+
+        period_labels = {"morning": "早上", "day": "白天", "evening": "晚上"}
+        current_period = self.plugin_config.active_time_period
+        current_label = period_labels.get(current_period, "白天")
+
+        time_refs = self.plugin_config.persona_time_period_refs
+        has_any = any(time_refs.get(pk, []) for pk in ("morning", "day", "evening"))
+        if not has_any:
+            yield event.plain_result(
+                f"🎭 当前人设: {self.plugin_config.persona_name}\n"
+                f"🕐 当前时段: {current_label}\n"
+                "所有时段暂无参考图"
+            )
+            return
+
+        yield event.plain_result(
+            f"🎭 当前人设: {self.plugin_config.persona_name} · 当前时段: {current_label}"
+        )
+        for period_key, label in [("morning", "早上"), ("day", "白天"), ("evening", "晚上")]:
+            refs = time_refs.get(period_key, [])
+            if not refs:
+                continue
+            yield event.plain_result(f"🕐 {label} 时段 · {len(refs)} 张")
+            for ref in refs:
+                try:
+                    if os.path.isfile(ref):
+                        yield event.chain_result([Image.fromFileSystem(os.path.abspath(ref))])
+                except Exception:
+                    pass
+
     @filter.command("切换链路")
     @handle_errors
     async def cmd_switch_chain(
@@ -2109,11 +2601,8 @@ class OmniDrawPlugin(Star):
 
         if not self.plugin_config.presets:
             return
-        match = re.match(r"^\s*[/!！.]([^\s]+)", text)
-        if not match:
-            return
-        cmd_name = match.group(1).strip()
-        if cmd_name not in self.plugin_config.presets:
+        cmd_name = self._match_preset_trigger(text)
+        if not cmd_name:
             return
         permission_error = self._permission_denied_message(event)
         if permission_error:
@@ -2135,13 +2624,13 @@ class OmniDrawPlugin(Star):
                     self.plugin_config.draw_pending_message,
                     DEFAULT_DRAW_PENDING_MESSAGE,
                     command=cmd_name,
-                    prompt=preset_prompt,
+                    prompt=self._preset_prompt_for_reply(preset_prompt),
                     ref_count=len(safe_refs),
                     param_count=0,
                     persona_name=self.plugin_config.persona_name,
                 )
                 if self.plugin_config.verbose_report:
-                    msg += f"\n📝 宏对应提示词: {preset_prompt}\n🖼️ 实际参考图：{len(safe_refs)} 张"
+                    msg += "\n" + self._build_preset_verbose_report(preset_prompt, len(safe_refs))
                 yield event.plain_result(msg)
 
                 chain_manager = ChainManager(self.plugin_config, session)
@@ -2243,6 +2732,8 @@ class OmniDrawPlugin(Star):
         user_input, kwargs = self.cmd_parser.parse(message)
         user_input = user_input or "看着镜头微笑"
 
+        ref_info = self._current_persona_reference_info()
+
         started_at = time.perf_counter()
         async with aiohttp.ClientSession() as session:
             optimized_actions = await self.prompt_optimizer.optimize(user_input, count=1, session=session)
@@ -2250,7 +2741,7 @@ class OmniDrawPlugin(Star):
             extra_kwargs.update(kwargs)
 
             raw_refs = self._get_event_images(event)
-            target_refs = raw_refs if raw_refs else self.plugin_config.persona_ref_images
+            target_refs = raw_refs if raw_refs else ref_info["refs"]
             safe_refs = await self._process_and_save_images(target_refs, session=session)
             if safe_refs:
                 extra_kwargs["user_refs"] = safe_refs
@@ -2265,10 +2756,14 @@ class OmniDrawPlugin(Star):
                 user_input=user_input,
                 ref_count=len(safe_refs),
                 param_count=len(kwargs),
-                persona_name=self.plugin_config.persona_name,
+                persona_name=ref_info["persona_name"],
             )
             if self.plugin_config.verbose_report:
-                msg += f"\n📝 构建提示词: {final_prompt}\n⚙️ 附加参数：{len(kwargs)} 个\n🖼️ 实际参考图：{len(safe_refs)} 张"
+                msg += (
+                    f"\n📝 构建提示词: {final_prompt}"
+                    f"\n🕐 当前时段：{ref_info['period_label']}（{ref_info['source_label']}）"
+                    f"\n⚙️ 附加参数：{len(kwargs)} 个\n🖼️ 实际参考图：{len(safe_refs)} 张"
+                )
             yield event.plain_result(msg)
 
             chain_to_use = "selfie" if self.plugin_config.chains.get("selfie") else "text2img"
@@ -2352,10 +2847,13 @@ class OmniDrawPlugin(Star):
             quota_error = self._image_quota_error_message(event, count)
             if quota_error:
                 return quota_error
+
+            ref_info = self._current_persona_reference_info()
+
             async with aiohttp.ClientSession() as session:
                 optimized_actions = await self.prompt_optimizer.optimize(action or "看着镜头微笑", count, session=session)
                 raw_refs = self._get_event_images(event)
-                target_refs = raw_refs if raw_refs else self.plugin_config.persona_ref_images
+                target_refs = raw_refs if raw_refs else ref_info["refs"]
                 safe_refs = await self._process_and_save_images(target_refs, session=session)
                 extra_param_kwargs = self._parse_extra_params(extra_params)
 
@@ -2385,6 +2883,47 @@ class OmniDrawPlugin(Star):
         except Exception as exc:
             logger.error(f"[OmniDraw] LLM 自拍工具失败: {exc}", exc_info=True)
             return f"系统提示：画图失败 ({exc})。"
+
+    @llm_tool(name="view_current_reference_images")
+    async def tool_view_current_reference_images(
+        self,
+        event: AstrMessageEvent,
+        send_images: bool = True,
+    ) -> str:
+        """
+        只读查看当前人设、当前系统时段和当前 /自拍 会使用的参考图。
+        Args:
+            send_images (bool): 是否把当前参考图发送到聊天中。默认为 True。
+        """
+        permission_error = self._permission_denied_message(event)
+        if permission_error:
+            return permission_error
+
+        ref_info = self._current_persona_reference_info(refresh_period=False)
+        refs = ref_info["refs"]
+        sent = 0
+        if send_images:
+            for ref in refs:
+                try:
+                    ref_str = str(ref or "")
+                    if os.path.isfile(ref_str):
+                        await event.send(event.chain_result([Image.fromFileSystem(os.path.abspath(ref_str))]))
+                        sent += 1
+                    elif ref_str.startswith("http") and hasattr(Image, "fromURL"):
+                        await event.send(event.chain_result([Image.fromURL(ref_str)]))
+                        sent += 1
+                    await asyncio.sleep(0.2)
+                except Exception as exc:
+                    logger.warning(f"[OmniDraw] 当前参考图工具发送失败: {ref} ({exc})")
+
+        return (
+            "系统提示：当前参考图为只读查看，未修改任何配置。\n"
+            f"当前人设：{ref_info['persona_name']}\n"
+            f"当前时段：{ref_info['period_label']}\n"
+            f"参考图来源：{ref_info['source_label']}\n"
+            f"生效参考图：{len(refs)} 张"
+            + (f"，已下发 {sent} 张。" if send_images else "。")
+        )
 
     @llm_tool(name="generate_image")
     async def tool_generate_image(

@@ -121,6 +121,49 @@ class GeminiOfficialProvider(BaseProvider):
         )
         return best
 
+    def _image_size_from_size(self, value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if text in {"1K", "2K", "4K"}:
+            return text
+        official_format = self._parse_official_image_format(value)
+        if official_format.get("image_size"):
+            return official_format["image_size"]
+        match = re.fullmatch(r"\s*(\d+)\s*[xX×]\s*(\d+)\s*", text)
+        if not match:
+            return ""
+        max_side = max(int(match.group(1)), int(match.group(2)))
+        if max_side <= 1024:
+            return "1K"
+        if max_side <= 2048:
+            return "2K"
+        return "4K"
+
+    def _normalize_gemini_aspect_ratio(self, value: Any) -> str:
+        normalized = self._normalize_aspect_ratio_text(value)
+        if normalized:
+            return normalized
+        return self._aspect_ratio_from_size(value) or str(value or "").strip()
+
+    def _apply_gemini_image_options(self, params: Dict[str, Any]) -> None:
+        configured_aspect = self._configured_aspect_ratio()
+        if configured_aspect:
+            self._pop_any(params, "aspectRatio", "aspect_ratio")
+            params["aspect_ratio"] = self._normalize_gemini_aspect_ratio(configured_aspect)
+
+        configured_size = self._configured_image_size()
+        if configured_size:
+            self._pop_any(params, "size", "imageSize", "image_size")
+            official_format = self._parse_official_image_format(configured_size)
+            if self._configured_resolution_mode() == "official" and official_format:
+                if official_format.get("aspect_ratio") and not configured_aspect:
+                    params["aspect_ratio"] = official_format["aspect_ratio"]
+                if official_format.get("image_size"):
+                    params["image_size"] = official_format["image_size"]
+            elif self._aspect_ratio_from_size(configured_size):
+                params["size"] = configured_size
+            else:
+                params["image_size"] = configured_size
+
     def _build_generation_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
         modalities = self._pop_any(params, "responseModalities", "response_modalities")
         generation_config: Dict[str, Any] = {
@@ -143,13 +186,17 @@ class GeminiOfficialProvider(BaseProvider):
             if source_key in params:
                 generation_config[target_key] = params.pop(source_key)
 
+        raw_size = self._pop_any(params, "size")
+        raw_size_format = self._parse_official_image_format(raw_size)
         aspect_ratio = self._pop_any(params, "aspectRatio", "aspect_ratio")
         if not aspect_ratio:
-            aspect_ratio = self._aspect_ratio_from_size(self._pop_any(params, "size"))
+            aspect_ratio = raw_size_format.get("aspect_ratio") or self._aspect_ratio_from_size(raw_size)
         image_size = self._pop_any(params, "imageSize", "image_size")
+        if not image_size:
+            image_size = raw_size_format.get("image_size") or self._image_size_from_size(raw_size)
         image_options = {}
         if aspect_ratio:
-            image_options["aspectRatio"] = str(aspect_ratio).strip()
+            image_options["aspectRatio"] = self._normalize_gemini_aspect_ratio(aspect_ratio)
         if image_size:
             image_options["imageSize"] = str(image_size).strip().upper()
         if image_options:
@@ -213,6 +260,7 @@ class GeminiOfficialProvider(BaseProvider):
 
         internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
         api_kwargs = {key: value for key, value in kwargs.items() if key not in internal_keys}
+        self._apply_gemini_image_options(api_kwargs)
         model = self._request_model(api_kwargs)
         if not model:
             raise ValueError("Gemini 官方节点未配置模型名！")
