@@ -1,0 +1,292 @@
+"""Google Gemini native image provider."""
+
+import base64
+import json
+import math
+import os
+import re
+from typing import Any, Dict, List
+from urllib.parse import quote
+
+import aiohttp
+from astrbot.api import logger
+
+from ..constants import DEFAULT_GEMINI_BASE_URL, DEFAULT_GEMINI_MODEL
+from .base import (
+    BaseProvider,
+    extract_error_message,
+    extract_image_url_from_response,
+    guess_image_content_type,
+    normalize_base_url,
+    summarize_payload_json_for_log,
+    summarize_response_text_for_log,
+    summarize_url_for_log,
+)
+
+
+MAX_REFERENCE_IMAGES = 14
+ALLOWED_ASPECT_RATIOS = (
+    "1:1",
+    "3:4",
+    "4:3",
+    "9:16",
+    "16:9",
+    "2:3",
+    "3:2",
+    "4:5",
+    "5:4",
+    "21:9",
+    "1:4",
+    "4:1",
+    "1:8",
+    "8:1",
+)
+
+
+class GeminiOfficialProvider(BaseProvider):
+    """Call Google's native Gemini generateContent endpoint."""
+
+    async def _get_image_bytes(self, image_path_or_url: str) -> bytes:
+        if image_path_or_url.startswith("data:image"):
+            try:
+                return base64.b64decode(image_path_or_url.split(",", 1)[1], validate=False)
+            except Exception as exc:
+                raise RuntimeError(f"Base64 参考图解析失败: {exc}")
+        if image_path_or_url.startswith("http"):
+            logger.info("📥 [Gemini官方通道] 正在下载网络参考图并转码...")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with self.session.get(image_path_or_url, headers=headers) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"参考图下载失败，服务器返回状态码: {response.status}")
+                return await response.read()
+        if not os.path.exists(image_path_or_url):
+            raise RuntimeError(f"本地参考图不存在: {image_path_or_url}")
+        with open(image_path_or_url, "rb") as file:
+            return file.read()
+
+    async def _inline_image_part(self, image_path_or_url: str) -> Dict[str, Any]:
+        image_bytes = await self._get_image_bytes(image_path_or_url)
+        return {
+            "inlineData": {
+                "mimeType": guess_image_content_type(image_path_or_url),
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            }
+        }
+
+    def _request_model(self, api_kwargs: Dict[str, Any]) -> str:
+        model = str(api_kwargs.pop("model", "") or self.config.model or DEFAULT_GEMINI_MODEL).strip()
+        if model.startswith("models/"):
+            return model.split("/", 1)[1]
+        return model
+
+    def _endpoint(self, model: str) -> str:
+        base_url = normalize_base_url(self.config.base_url) or DEFAULT_GEMINI_BASE_URL
+        if ":generateContent" in base_url:
+            return base_url
+        if "/models/" in base_url:
+            return f"{base_url}:generateContent"
+        if base_url.endswith("/models"):
+            base_url = base_url[: -len("/models")]
+        return f"{base_url}/models/{quote(model, safe='-._~')}:generateContent"
+
+    def _pop_any(self, params: Dict[str, Any], *names: str) -> Any:
+        for name in names:
+            if name in params:
+                return params.pop(name)
+        return None
+
+    def _normalize_modalities(self, value: Any) -> List[str]:
+        if isinstance(value, (list, tuple)):
+            raw_items = value
+        else:
+            raw_items = re.split(r"[\s,]+", str(value or ""))
+        items = []
+        for item in raw_items:
+            text = str(item or "").strip().upper()
+            if text:
+                items.append("IMAGE" if text == "IMG" else text)
+        return items or ["TEXT", "IMAGE"]
+
+    def _aspect_ratio_from_size(self, value: Any) -> str:
+        match = re.fullmatch(r"\s*(\d+)\s*[xX×]\s*(\d+)\s*", str(value or ""))
+        if not match:
+            return ""
+        width, height = int(match.group(1)), int(match.group(2))
+        if width <= 0 or height <= 0:
+            return ""
+        ratio = width / height
+        best = min(
+            ALLOWED_ASPECT_RATIOS,
+            key=lambda item: abs(math.log(ratio / (int(item.split(":")[0]) / int(item.split(":")[1])))),
+        )
+        return best
+
+    def _image_size_from_size(self, value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if text in {"1K", "2K", "4K"}:
+            return text
+        official_format = self._parse_official_image_format(value)
+        if official_format.get("image_size"):
+            return official_format["image_size"]
+        match = re.fullmatch(r"\s*(\d+)\s*[xX×]\s*(\d+)\s*", text)
+        if not match:
+            return ""
+        max_side = max(int(match.group(1)), int(match.group(2)))
+        if max_side <= 1024:
+            return "1K"
+        if max_side <= 2048:
+            return "2K"
+        return "4K"
+
+    def _normalize_gemini_aspect_ratio(self, value: Any) -> str:
+        normalized = self._normalize_aspect_ratio_text(value)
+        if normalized:
+            return normalized
+        return self._aspect_ratio_from_size(value) or str(value or "").strip()
+
+    def _apply_gemini_image_options(self, params: Dict[str, Any]) -> None:
+        configured_aspect = self._configured_aspect_ratio()
+        if configured_aspect:
+            self._pop_any(params, "aspectRatio", "aspect_ratio")
+            params["aspect_ratio"] = self._normalize_gemini_aspect_ratio(configured_aspect)
+
+        configured_size = self._configured_image_size()
+        if configured_size:
+            self._pop_any(params, "size", "imageSize", "image_size")
+            official_format = self._parse_official_image_format(configured_size)
+            if self._configured_resolution_mode() == "official" and official_format:
+                if official_format.get("aspect_ratio") and not configured_aspect:
+                    params["aspect_ratio"] = official_format["aspect_ratio"]
+                if official_format.get("image_size"):
+                    params["image_size"] = official_format["image_size"]
+            elif self._aspect_ratio_from_size(configured_size):
+                params["size"] = configured_size
+            else:
+                params["image_size"] = configured_size
+
+    def _build_generation_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        modalities = self._pop_any(params, "responseModalities", "response_modalities")
+        generation_config: Dict[str, Any] = {
+            "responseModalities": self._normalize_modalities(modalities or ["TEXT", "IMAGE"])
+        }
+
+        key_map = {
+            "temperature": "temperature",
+            "topP": "topP",
+            "top_p": "topP",
+            "topK": "topK",
+            "top_k": "topK",
+            "candidateCount": "candidateCount",
+            "candidate_count": "candidateCount",
+            "maxOutputTokens": "maxOutputTokens",
+            "max_output_tokens": "maxOutputTokens",
+            "seed": "seed",
+        }
+        for source_key, target_key in key_map.items():
+            if source_key in params:
+                generation_config[target_key] = params.pop(source_key)
+
+        raw_size = self._pop_any(params, "size")
+        raw_size_format = self._parse_official_image_format(raw_size)
+        aspect_ratio = self._pop_any(params, "aspectRatio", "aspect_ratio")
+        if not aspect_ratio:
+            aspect_ratio = raw_size_format.get("aspect_ratio") or self._aspect_ratio_from_size(raw_size)
+        image_size = self._pop_any(params, "imageSize", "image_size")
+        if not image_size:
+            image_size = raw_size_format.get("image_size") or self._image_size_from_size(raw_size)
+        image_options = {}
+        if aspect_ratio:
+            image_options["aspectRatio"] = self._normalize_gemini_aspect_ratio(aspect_ratio)
+        if image_size:
+            image_options["imageSize"] = str(image_size).strip().upper()
+        if image_options:
+            generation_config["imageConfig"] = image_options
+        return generation_config
+
+    def _build_top_level_overrides(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        top_level = {}
+        for source_key, target_key in (
+            ("safetySettings", "safetySettings"),
+            ("safety_settings", "safetySettings"),
+            ("systemInstruction", "systemInstruction"),
+            ("system_instruction", "systemInstruction"),
+        ):
+            if source_key in params:
+                top_level[target_key] = params.pop(source_key)
+        return top_level
+
+    def _failure_summary(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return summarize_response_text_for_log(str(payload), max_string_length=500)
+        candidates = payload.get("candidates")
+        if isinstance(candidates, list) and candidates:
+            candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+            finish_reason = candidate.get("finishReason") or candidate.get("finish_reason") or "UNKNOWN"
+            content = candidate.get("content") or {}
+            parts = content.get("parts") if isinstance(content, dict) else []
+            texts = []
+            if isinstance(parts, list):
+                texts = [str(part.get("text", "")).strip() for part in parts if isinstance(part, dict) and part.get("text")]
+            text_suffix = f"；文本响应: {' '.join(texts)[:240]}" if texts else ""
+            return f"finishReason={finish_reason}{text_suffix}"
+        return summarize_payload_json_for_log(payload, max_string_length=500)
+
+    async def _post_json(self, endpoint: str, headers: Dict[str, str], payload: Dict[str, Any]) -> str:
+        timeout_obj = aiohttp.ClientTimeout(total=self.config.timeout)
+        logger.info(f"📤 [Gemini官方通道] 请求路径: {summarize_url_for_log(endpoint)}")
+        logger.info(f"📤 [Gemini官方通道] 请求体摘要: {summarize_payload_json_for_log(payload)}")
+        async with self.session.post(endpoint, json=payload, headers=headers, timeout=timeout_obj) as response:
+            text = await response.text()
+            if response.status >= 400:
+                logger.error("💥 Gemini官方通道 API 返回错误摘要: " + summarize_response_text_for_log(text, max_string_length=500))
+                raise RuntimeError(f"HTTP {response.status}: {extract_error_message(text)}")
+            try:
+                result = json.loads(text)
+            except Exception:
+                raise ValueError("Gemini 官方接口返回结构异常，响应不是 JSON: " + summarize_response_text_for_log(text))
+            image_url = extract_image_url_from_response(result, endpoint)
+            if image_url:
+                return image_url
+            raise ValueError("Gemini 官方接口未返回图片数据: " + self._failure_summary(result))
+
+    async def generate_image(self, prompt: str, **kwargs: Any) -> str:
+        current_key = self.get_current_key()
+        if not current_key:
+            raise ValueError("节点未配置 API Key！")
+
+        ref_images = self.get_reference_images(**kwargs)
+        if len(ref_images) > MAX_REFERENCE_IMAGES:
+            raise ValueError(f"Gemini 官方接口最多支持 {MAX_REFERENCE_IMAGES} 张参考图。")
+
+        internal_keys = {"user_refs", "user_ref", "persona_refs", "persona_ref"}
+        api_kwargs = {key: value for key, value in kwargs.items() if key not in internal_keys}
+        self._apply_gemini_image_options(api_kwargs)
+        model = self._request_model(api_kwargs)
+        if not model:
+            raise ValueError("Gemini 官方节点未配置模型名！")
+
+        endpoint = self._endpoint(model)
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": current_key,
+        }
+
+        parts: List[Dict[str, Any]] = [{"text": str(prompt or "")}]
+        for index, ref_image in enumerate(ref_images, start=1):
+            try:
+                parts.append(await self._inline_image_part(ref_image))
+            except Exception as exc:
+                raise RuntimeError(f"读取第 {index} 张参考图数据失败: {exc}")
+
+        payload: Dict[str, Any] = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": self._build_generation_config(api_kwargs),
+        }
+        payload.update(self._build_top_level_overrides(api_kwargs))
+
+        if api_kwargs:
+            ignored = ", ".join(sorted(str(key) for key in api_kwargs))
+            logger.info(f"ℹ️ [Gemini官方通道] 已忽略非 Gemini 官方参数: {ignored}")
+
+        logger.info(f"📝 [Gemini官方通道] 最终发送给 API 的核心提示词:\n{prompt}")
+        return await self._post_json(endpoint, headers, payload)
